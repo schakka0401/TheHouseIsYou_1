@@ -1,12 +1,13 @@
 # The House Is You
 
-## Run the main menu
+Run the game from the project folder:
 
-```bash
-python -m pip install -r requirements.txt
-python -m game.main
+```powershell
+py game\main.py
 ```
 
-Use **Up** and **Down** (or **W** and **S**) to move the selection. The
-selected button receives the red fill and diamond markers shown in the
-reference. **Escape** or **Q** closes the preview window.
+Use `WASD` to move. Walk through the right edge of the card room to reach the blackjack room. At either table, press `E` to play.
+
+- Card table: `Space` deals a new hand.
+- Blackjack: `H` hits, `S` stands, and `N` starts a new round.
+- `Esc` leaves a table.

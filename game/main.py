@@ -1,294 +1,282 @@
-"""Main menu for The House Is You.
+"""The House Is You: explore rooms, deal cards, and play blackjack."""
 
-The supplied 1920x1080 image owns the complete casino composition. This module
-only renders and handles the interactive menu layer above it.
-"""
-from __future__ import annotations
-
-import sys
 from pathlib import Path
+import random
 
 import pygame
 
-VIRTUAL_SIZE = (1920, 1080)
-VIRTUAL_WIDTH, VIRTUAL_HEIGHT = VIRTUAL_SIZE
-FPS = 60
-FADE_IN_MS = 420
-PRESS_MS = 100
 
-GOLD = (201, 151, 46)
-HIGHLIGHT_GOLD = (241, 210, 119)
-CREAM = (255, 229, 157)
-NORMAL_FILL_TOP = (25, 13, 12)
-NORMAL_FILL_BOTTOM = (11, 7, 7)
-SELECTED_FILL_TOP = (132, 10, 25)
-SELECTED_FILL_BOTTOM = (65, 4, 13)
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+WINDOW_SIZE = (1280, 720)
+CARD_SIZE = (150, 210)
+PLAYER_SIZE = (96, 96)
+PLAYER_SPEED = 300
+HAND_SIZE = 5
+ASSETS = Path(__file__).resolve().parent.parent / "static" / "assets"
+CARD_DIRECTORY = ASSETS / "cards"
+DUDE_DIRECTORY = ASSETS / "free-pixel-art-tiny-hero-sprites" / "3 Dude_Monster"
+CASINO_DIRECTORY = ASSETS / "2D Top Down Pixel Art Tileset Casino"
+CASINO_TILESET = CASINO_DIRECTORY / "2D_TopDown_Tileset_Casino_1024x512.png"
+TABLE = pygame.Rect(465, 250, 350, 220)
 
 
-def background_path() -> Path:
-    root = project_root()
-    # The first path is the requested location; the second matches this repo's
-    # current asset layout, so either layout works without changing the UI.
-    for relative in (Path("assets/menu/main_menu_background.png"),
-                     Path("static/assets/main_menu_background.png")):
-        candidate = root / relative
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError("Could not find assets/menu/main_menu_background.png")
+def load_animation(filename: str, frames: int) -> list[pygame.Surface]:
+    """Split a horizontal sprite sheet into individual scaled frames."""
+    sheet = pygame.image.load(DUDE_DIRECTORY / filename).convert_alpha()
+    frame_width = sheet.get_width() // frames
+    images = []
+    for index in range(frames):
+        frame = sheet.subsurface((index * frame_width, 0, frame_width, sheet.get_height()))
+        images.append(pygame.transform.scale(frame, PLAYER_SIZE))
+    return images
 
 
-def serif_font(size: int, bold: bool = False) -> pygame.font.Font:
-    """Use a classic serif without downloading or adding a font dependency."""
-    for name in ("Georgia", "Baskerville", "Times New Roman", "serif"):
-        path = pygame.font.match_font(name, bold=bold)
-        if path:
-            return pygame.font.Font(path, size)
-    return pygame.font.Font(None, size)
+def load_cards() -> list[tuple[str, pygame.Surface]]:
+    cards = []
+    for path in sorted(CARD_DIRECTORY.glob("*.png")):
+        if path.stem in {"card_back_1", "joker"}:
+            continue
+        image = pygame.image.load(path).convert_alpha()
+        cards.append((path.stem.replace("_", " ").title(), pygame.transform.smoothscale(image, CARD_SIZE)))
+    if not cards:
+        raise FileNotFoundError(f"No card PNGs found in {CARD_DIRECTORY}")
+    return cards
 
 
-def diamond(surface: pygame.Surface, center: tuple[int, int], size: int,
-            fill: tuple[int, int, int], outline: tuple[int, int, int]) -> None:
-    x, y = center
-    points = ((x, y - size), (x + size, y), (x, y + size), (x - size, y))
-    pygame.draw.polygon(surface, fill, points)
-    pygame.draw.polygon(surface, outline, points, 2)
+def make_casino_room(tileset: pygame.Surface, room: int) -> pygame.Surface:
+    """Build a full-sized casino room from the supplied pixel-art tileset."""
+    background = pygame.Surface(WINDOW_SIZE)
+    background.fill("#64162c")
+
+    red_carpet = pygame.transform.scale(tileset.subsurface((0, 0, 32, 32)), (48, 48))
+    blue_carpet = pygame.transform.scale(tileset.subsurface((0, 128, 32, 32)), (48, 48))
+
+    def tile(surface: pygame.Surface, image: pygame.Surface, area: pygame.Rect) -> None:
+        for y in range(area.top, area.bottom, image.get_height()):
+            for x in range(area.left, area.right, image.get_width()):
+                surface.blit(image, (x, y))
+
+    # A solid color beneath the transparent tile art prevents sheet-padding from
+    # showing up as distracting black seams.
+    tile(background, red_carpet, pygame.Rect(0, 48, WINDOW_SIZE[0], WINDOW_SIZE[1] - 48))
+    floor = pygame.Rect(96, 112, WINDOW_SIZE[0] - 192, WINDOW_SIZE[1] - 176)
+    background.fill("#192c78", floor)
+    tile(background, blue_carpet, floor)
+
+    # Use two unscaled, deliberate strips from the pack instead of a collage of furniture.
+    slot_bank = pygame.transform.scale(tileset.subsurface((640, 0, 155, 70)), (310, 140))
+    slot_bank.set_colorkey("#000000")
+    background.blit(slot_bank, slot_bank.get_rect(midtop=(WINDOW_SIZE[0] // 2, 105)))
+    side_slots = pygame.transform.scale(tileset.subsurface((795, 0, 120, 70)), (240, 140))
+    side_slots.set_colorkey("#000000")
+    background.blit(side_slots, (115, 505))
+    background.blit(side_slots, (WINDOW_SIZE[0] - 355, 505))
+    return background
 
 
-def rounded_gradient(size: tuple[int, int], top: tuple[int, int, int],
-                    bottom: tuple[int, int, int], radius: int) -> pygame.Surface:
-    """Create one reusable rounded vertical gradient for a button state."""
-    width, height = size
-    surface = pygame.Surface(size, pygame.SRCALPHA)
-    for y in range(height):
-        amount = y / max(1, height - 1)
-        color = tuple(int(top[index] * (1 - amount) + bottom[index] * amount)
-                      for index in range(3))
-        pygame.draw.line(surface, color, (0, y), (width, y))
-    mask = pygame.Surface(size, pygame.SRCALPHA)
-    pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=radius)
-    surface.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-    return surface
+def load_casino_scenes() -> tuple[list[pygame.Surface], list[pygame.Surface]]:
+    """Load casino-room backgrounds plus the pack's roulette and blackjack tables."""
+    tileset = pygame.image.load(CASINO_TILESET).convert_alpha()
+    rooms = [make_casino_room(tileset, 0), make_casino_room(tileset, 1)]
+    roulette_table = tileset.subsurface((870, 263, 154, 105))
+    blackjack_table = tileset.subsurface((880, 194, 144, 65))
+    tables = [
+        pygame.transform.scale(roulette_table, (350, 238)),
+        pygame.transform.scale(blackjack_table, (390, 176)),
+    ]
+    return rooms, tables
 
 
-class MenuButton:
-    """One menu choice with cached visuals and a small tactile press response."""
-
-    def __init__(self, label: str, center_y: int, font: pygame.font.Font):
-        self.label = label
-        self.base_rect = pygame.Rect(690, center_y - 45, 540, 90)
-        self.font = font
-        self.selected = False
-        self.hovered = False
-        self.pressed_until = 0
-        self.normal_fill = rounded_gradient(self.base_rect.size, NORMAL_FILL_TOP,
-                                            NORMAL_FILL_BOTTOM, 15)
-        self.selected_fill = rounded_gradient(self.base_rect.size, SELECTED_FILL_TOP,
-                                              SELECTED_FILL_BOTTOM, 15)
-        self.label_image = font.render(label, True, CREAM)
-        self.label_shadow = font.render(label, True, (0, 0, 0))
-        self.glow = self._make_glow()
-
-    def _make_glow(self) -> pygame.Surface:
-        glow = pygame.Surface((self.base_rect.width + 70, self.base_rect.height + 70),
-                              pygame.SRCALPHA)
-        for inset, alpha in ((30, 8), (22, 12), (15, 20), (9, 28)):
-            rect = glow.get_rect().inflate(-inset * 2, -inset * 2)
-            pygame.draw.rect(glow, (*GOLD, alpha), rect, width=5, border_radius=20)
-        return glow
-
-    def contains_point(self, point: tuple[int, int]) -> bool:
-        return self.base_rect.collidepoint(point)
-
-    def update(self, now: int) -> None:
-        self.pressed_until = max(0, self.pressed_until)
-
-    def press(self, now: int) -> None:
-        self.pressed_until = now + PRESS_MS
-
-    def draw(self, surface: pygame.Surface, now: int) -> None:
-        is_pressed = now < self.pressed_until
-        # Selection is owned by MainMenu's input mode. Do not OR this with a
-        # stale hover flag: keyboard navigation must be able to clear mouse
-        # ownership until the mouse actually moves again.
-        selected = self.selected
-        scale = 0.985 if is_pressed else (1.015 if selected else 1.0)
-        width = int(self.base_rect.width * scale)
-        height = int(self.base_rect.height * scale)
-        rect = pygame.Rect(0, 0, width, height)
-        rect.center = self.base_rect.center
-        if is_pressed:
-            rect.y += 2
-
-        if selected and not is_pressed:
-            glow_rect = self.glow.get_rect(center=rect.center)
-            surface.blit(self.glow, glow_rect, special_flags=pygame.BLEND_RGBA_ADD)
-
-        fill = self.selected_fill if selected else self.normal_fill
-        if fill.get_size() != rect.size:
-            fill = pygame.transform.smoothscale(fill, rect.size)
-        surface.blit(fill, rect)
-
-        outer_color = HIGHLIGHT_GOLD if selected else GOLD
-        pygame.draw.rect(surface, (0, 0, 0, 125), rect.move(0, 6), width=5, border_radius=15)
-        pygame.draw.rect(surface, outer_color, rect, width=3, border_radius=15)
-        pygame.draw.rect(surface, (247, 211, 121, 165) if selected else (150, 107, 32, 175),
-                         rect.inflate(-7, -7), width=1, border_radius=11)
-
-        text_x = rect.centerx - self.label_image.get_width() // 2
-        text_y = rect.centery - self.label_image.get_height() // 2 + (2 if is_pressed else 0)
-        surface.blit(self.label_shadow, (text_x + 2, text_y + 2))
-        text = self.font.render(self.label, True, HIGHLIGHT_GOLD if selected else CREAM)
-        surface.blit(text, (text_x, text_y))
-        if selected:
-            ornament_y = rect.centery + (2 if is_pressed else 0)
-            diamond(surface, (text_x - 43, ornament_y), 11, (177, 18, 31), HIGHLIGHT_GOLD)
-            diamond(surface, (text_x + self.label_image.get_width() + 43, ornament_y),
-                    11, (177, 18, 31), HIGHLIGHT_GOLD)
+def card_value(name: str) -> int:
+    """Return a blackjack card value; aces start as 11."""
+    rank = name.split()[0]
+    if rank == "Ace":
+        return 11
+    if rank in {"King", "Queen", "Jack"}:
+        return 10
+    return int(rank)
 
 
-class MainMenu:
-    """Virtual-resolution menu presentation and input handling."""
-
-    def __init__(self, screen: pygame.Surface):
-        self.screen = screen
-        self.ui_canvas = pygame.Surface(VIRTUAL_SIZE, pygame.SRCALPHA)
-        self.background = pygame.image.load(background_path()).convert_alpha()
-        if self.background.get_size() != VIRTUAL_SIZE:
-            self.background = pygame.transform.smoothscale(self.background, VIRTUAL_SIZE)
-        self.background_scaled: pygame.Surface | None = None
-        self.viewport = pygame.Rect(0, 0, *VIRTUAL_SIZE)
-        label_font = serif_font(34, True)
-        self.buttons = [
-            MenuButton("PLAY GAME", 675, label_font),
-            MenuButton("OPTIONS", 790, label_font),
-            MenuButton("QUIT GAME", 900, label_font),
-        ]
-        self.selected_index = 0
-        self.buttons[0].selected = True
-        self.input_mode = "mouse"
-        self.previous_mouse_position = pygame.mouse.get_pos()
-        self.started_at = pygame.time.get_ticks()
-
-    def update_viewport(self) -> None:
-        screen_width, screen_height = self.screen.get_size()
-        scale = min(screen_width / VIRTUAL_WIDTH, screen_height / VIRTUAL_HEIGHT)
-        width = max(1, round(VIRTUAL_WIDTH * scale))
-        height = max(1, round(VIRTUAL_HEIGHT * scale))
-        self.viewport = pygame.Rect((screen_width - width) // 2,
-                                    (screen_height - height) // 2, width, height)
-        if self.background_scaled is None or self.background_scaled.get_size() != (width, height):
-            self.background_scaled = pygame.transform.smoothscale(self.background, (width, height))
-
-    def screen_to_virtual(self, point: tuple[int, int]) -> tuple[int, int] | None:
-        if not self.viewport.collidepoint(point):
-            return None
-        x = round((point[0] - self.viewport.left) * VIRTUAL_WIDTH / self.viewport.width)
-        y = round((point[1] - self.viewport.top) * VIRTUAL_HEIGHT / self.viewport.height)
-        return x, y
-
-    def choose(self, index: int) -> None:
-        self.selected_index = index % len(self.buttons)
-        for button_index, button in enumerate(self.buttons):
-            button.selected = button_index == self.selected_index
-            button.hovered = False
-
-    def choose_from_mouse(self, index: int) -> None:
-        self.input_mode = "mouse"
-        self.choose(index)
-
-    def move_selection(self, amount: int) -> None:
-        self.choose(self.selected_index + amount)
-
-    def activate(self, now: int) -> bool:
-        """Return False only for Quit; Play/Options retain their current no-op behavior."""
-        button = self.buttons[self.selected_index]
-        button.press(now)
-        if button.label == "QUIT GAME":
-            return False
-        return True
-
-    def handle_event(self, event: pygame.event.Event, now: int) -> bool:
-        if event.type == pygame.VIDEORESIZE:
-            self.update_viewport()
-        elif event.type == pygame.KEYDOWN:
-            if event.key in (pygame.K_UP, pygame.K_w):
-                self.input_mode = "keyboard"
-                self.move_selection(-1)
-            elif event.key in (pygame.K_DOWN, pygame.K_s):
-                self.input_mode = "keyboard"
-                self.move_selection(1)
-            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                return self.activate(now)
-            elif event.key in (pygame.K_ESCAPE, pygame.K_q):
-                return False
-        elif event.type == pygame.MOUSEMOTION:
-            moved = event.pos != self.previous_mouse_position
-            self.previous_mouse_position = event.pos
-            if not moved:
-                return True
-
-            self.input_mode = "mouse"
-            point = self.screen_to_virtual(event.pos)
-            for index, button in enumerate(self.buttons):
-                if point is not None and button.contains_point(point):
-                    self.choose_from_mouse(index)
-                    break
-        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            self.previous_mouse_position = event.pos
-            point = self.screen_to_virtual(event.pos)
-            for index, button in enumerate(self.buttons):
-                if point is not None and button.contains_point(point):
-                    self.choose_from_mouse(index)
-                    return self.activate(now)
-        return True
-
-    def draw(self, now: int) -> None:
-        self.update_viewport()
-        self.ui_canvas.fill((0, 0, 0, 0))
-        for button in self.buttons:
-            button.update(now)
-            button.draw(self.ui_canvas, now)
-
-        # The background is a cached viewport surface. Only the interactive UI
-        # layer is scaled each frame for hover/press animation.
-        self.screen.fill((8, 4, 5))
-        self.screen.blit(self.background_scaled, self.viewport.topleft)
-        ui_scaled = pygame.transform.smoothscale(self.ui_canvas, self.viewport.size)
-        self.screen.blit(ui_scaled, self.viewport.topleft)
-
-        # Fade the complete composition during the first appearance.
-        elapsed = now - self.started_at
-        fade_progress = max(0.0, min(1.0, elapsed / FADE_IN_MS))
-        if fade_progress < 1.0:
-            overlay = pygame.Surface(self.viewport.size, pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, round(255 * (1 - fade_progress))))
-            self.screen.blit(overlay, self.viewport.topleft)
+def hand_value(hand: list[tuple[str, pygame.Surface]]) -> int:
+    value = sum(card_value(name) for name, _ in hand)
+    aces = sum(name.startswith("Ace ") for name, _ in hand)
+    while value > 21 and aces:
+        value -= 10
+        aces -= 1
+    return value
 
 
-def run() -> None:
+def draw_room(
+    screen: pygame.Surface,
+    player: pygame.Vector2,
+    image: pygame.Surface,
+    font: pygame.font.Font,
+    room: int,
+    backgrounds: list[pygame.Surface],
+    tables: list[pygame.Surface],
+) -> None:
+    screen.blit(backgrounds[room], (0, 0))
+    table = tables[room]
+    screen.blit(table, table.get_rect(center=TABLE.center))
+
+    room_name = "Card Room" if room == 0 else "Blackjack Room"
+    screen.blit(font.render(f"THE HOUSE IS YOU  —  {room_name}", True, "#ffffff"), (40, 30))
+    screen.blit(image, image.get_rect(center=player))
+
+    if player.distance_to(pygame.Vector2(TABLE.center)) < 190:
+        action = "play blackjack" if room else "sit at the table"
+        prompt = font.render(f"Press E to {action}", True, "#ffffff")
+        screen.blit(prompt, prompt.get_rect(center=(TABLE.centerx, TABLE.bottom + 45)))
+    else:
+        exit_hint = "A: return to card room" if room else "D: enter blackjack room"
+        hint = font.render(f"WASD: move     {exit_hint}", True, "#ffffff")
+        screen.blit(hint, (40, 650))
+
+
+def draw_card_game(screen: pygame.Surface, hand: list[tuple[str, pygame.Surface]], title_font: pygame.font.Font, font: pygame.font.Font) -> None:
+    screen.fill("#154734")
+    title = title_font.render("Card Table", True, "#f7e9b9")
+    hint = font.render("SPACE: deal a new hand     ESC: return to room", True, "#ffffff")
+    screen.blit(title, title.get_rect(center=(WINDOW_SIZE[0] // 2, 70)))
+    screen.blit(hint, hint.get_rect(center=(WINDOW_SIZE[0] // 2, 125)))
+
+    total_width = len(hand) * CARD_SIZE[0] + (len(hand) - 1) * 24
+    first_x = (WINDOW_SIZE[0] - total_width) // 2
+    for index, (name, image) in enumerate(hand):
+        x = first_x + index * (CARD_SIZE[0] + 24)
+        y = 255
+        screen.blit(image, (x, y))
+        label = font.render(name, True, "#ffffff")
+        screen.blit(label, label.get_rect(center=(x + CARD_SIZE[0] // 2, y + CARD_SIZE[1] + 25)))
+
+
+def draw_blackjack(
+    screen: pygame.Surface,
+    player_hand: list[tuple[str, pygame.Surface]],
+    dealer_hand: list[tuple[str, pygame.Surface]],
+    status: str,
+    title_font: pygame.font.Font,
+    font: pygame.font.Font,
+) -> None:
+    screen.fill("#154734")
+    screen.blit(title_font.render("Blackjack", True, "#f7e9b9"), (50, 35))
+    hint = "H: hit    S: stand    N: new round    ESC: return to room"
+    screen.blit(font.render(hint, True, "#ffffff"), (50, 100))
+    screen.blit(font.render(f"Dealer: {hand_value(dealer_hand)}", True, "#ffffff"), (50, 165))
+    screen.blit(font.render(f"You: {hand_value(player_hand)}", True, "#ffffff"), (50, 430))
+    if status:
+        message = title_font.render(status, True, "#f7e9b9")
+        screen.blit(message, message.get_rect(center=(WINDOW_SIZE[0] // 2, 130)))
+
+    for y, hand in ((205, dealer_hand), (470, player_hand)):
+        for index, (_, image) in enumerate(hand):
+            screen.blit(image, (50 + index * (CARD_SIZE[0] + 24), y))
+
+
+def main() -> None:
     pygame.init()
+    screen = pygame.display.set_mode(WINDOW_SIZE)
     pygame.display.set_caption("The House Is You")
-    screen = pygame.display.set_mode(VIRTUAL_SIZE, pygame.RESIZABLE)
-    menu = MainMenu(screen)
     clock = pygame.time.Clock()
+    title_font = pygame.font.Font(None, 54)
+    font = pygame.font.Font(None, 30)
+
+    try:
+        idle_frames = load_animation("Dude_Monster_Idle_4.png", 4)
+        walk_frames = load_animation("Dude_Monster_Walk_6.png", 6)
+        deck = load_cards()
+        casino_backgrounds, casino_tables = load_casino_scenes()
+    except FileNotFoundError as error:
+        pygame.quit()
+        raise SystemExit(error) from error
+
+    player = pygame.Vector2(170, 520)
+    facing_left = False
+    animation_time = 0.0
+    mode = "room"
+    room = 0
+    hand = random.sample(deck, min(HAND_SIZE, len(deck)))
+    blackjack_player: list[tuple[str, pygame.Surface]] = []
+    blackjack_dealer: list[tuple[str, pygame.Surface]] = []
+    blackjack_status = "Press N to deal"
     running = True
+
+    def new_blackjack_round() -> None:
+        nonlocal blackjack_player, blackjack_dealer, blackjack_status
+        blackjack_player = [random.choice(deck), random.choice(deck)]
+        blackjack_dealer = [random.choice(deck), random.choice(deck)]
+        blackjack_status = ""
+        if hand_value(blackjack_player) == 21:
+            blackjack_status = "Blackjack! Press N for a new round."
+
     while running:
-        now = pygame.time.get_ticks()
+        delta_time = clock.tick(60) / 1000
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            elif not menu.handle_event(event, now):
-                running = False
-        menu.draw(now)
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    mode = "room"
+                elif mode == "cards" and event.key == pygame.K_SPACE:
+                    hand = random.sample(deck, min(HAND_SIZE, len(deck)))
+                elif mode == "blackjack":
+                    if event.key == pygame.K_n:
+                        new_blackjack_round()
+                    elif event.key == pygame.K_h and not blackjack_status:
+                        blackjack_player.append(random.choice(deck))
+                        if hand_value(blackjack_player) > 21:
+                            blackjack_status = "Bust! Dealer wins. Press N for a new round."
+                    elif event.key == pygame.K_s and not blackjack_status:
+                        while hand_value(blackjack_dealer) < 17:
+                            blackjack_dealer.append(random.choice(deck))
+                        player_score = hand_value(blackjack_player)
+                        dealer_score = hand_value(blackjack_dealer)
+                        if dealer_score > 21 or player_score > dealer_score:
+                            blackjack_status = "You win! Press N for a new round."
+                        elif player_score < dealer_score:
+                            blackjack_status = "Dealer wins. Press N for a new round."
+                        else:
+                            blackjack_status = "Push (tie). Press N for a new round."
+                elif mode == "room" and event.key == pygame.K_e and player.distance_to(pygame.Vector2(TABLE.center)) < 190:
+                    if room == 0:
+                        mode = "cards"
+                    else:
+                        mode = "blackjack"
+                        new_blackjack_round()
+
+        if mode == "cards":
+            draw_card_game(screen, hand, title_font, font)
+        elif mode == "blackjack":
+            draw_blackjack(screen, blackjack_player, blackjack_dealer, blackjack_status, title_font, font)
+        else:
+            keys = pygame.key.get_pressed()
+            direction = pygame.Vector2(keys[pygame.K_d] - keys[pygame.K_a], keys[pygame.K_s] - keys[pygame.K_w])
+            walking = direction.length_squared() > 0
+            if walking:
+                direction = direction.normalize()
+                player += direction * PLAYER_SPEED * delta_time
+                if room == 0 and player.x >= WINDOW_SIZE[0] - PLAYER_SIZE[0] // 2:
+                    room = 1
+                    player.x = PLAYER_SIZE[0] // 2
+                elif room == 1 and player.x <= PLAYER_SIZE[0] // 2:
+                    room = 0
+                    player.x = WINDOW_SIZE[0] - PLAYER_SIZE[0] // 2
+                else:
+                    player.x = max(PLAYER_SIZE[0] // 2, min(WINDOW_SIZE[0] - PLAYER_SIZE[0] // 2, player.x))
+                player.y = max(130, min(WINDOW_SIZE[1] - PLAYER_SIZE[1] // 2, player.y))
+                if direction.x:
+                    facing_left = direction.x < 0
+                animation_time += delta_time
+
+            frames = walk_frames if walking else idle_frames
+            frame = frames[int(animation_time * 10) % len(frames)]
+            if facing_left:
+                frame = pygame.transform.flip(frame, True, False)
+            draw_room(screen, player, frame, font, room, casino_backgrounds, casino_tables)
+
         pygame.display.flip()
-        clock.tick(FPS)
+
     pygame.quit()
-    sys.exit()
 
 
 if __name__ == "__main__":
-    run()
+    main()
