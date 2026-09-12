@@ -1,23 +1,84 @@
-"""Blackjack scenario generation and Monte Carlo decision evaluation.
+"""Exact finite-deck Blackjack decision evaluation and scenario generation.
 
-Rules are intentionally limited to HIT/STAND: the dealer hits below 17 and
-stands on every 17, aces are soft 11/1, face cards are worth 10, and there is
-no split, double, surrender, insurance, or blackjack payout special case.
-Visible cards are removed from every simulation deck.
+Only HIT and STAND are available. The dealer stands on every 17, aces count as
+11 when possible, and there are no splits, doubles, surrender, insurance, or
+special natural-blackjack payout. Every visible card is removed from the deck.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import random
+
 
 Card = tuple[str, str]
 RANKS = ("2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A")
 SUITS = ("clubs", "diamonds", "hearts", "spades")
-SIMULATIONS_PER_ACTION = 50_000
-SCENARIO_FILTER_SIMULATIONS = 200
+RANK_INDEX = {rank: index for index, rank in enumerate(RANKS)}
+RANK_HARD_VALUES = (2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 1)
+
 VERY_OBVIOUS_MARGIN = 0.30
 EASY_MARGIN = 0.18
 MEDIUM_MARGIN = 0.06
+
+# These rank-level states were classified with the exact evaluator below. Using
+# a validated bank avoids searching hundreds of candidates while Pygame's main
+# thread is waiting. Suits are assigned from a real deck at runtime, so every
+# visible state still has valid finite-deck composition.
+SCENARIO_BLUEPRINTS: dict[str, tuple[tuple[tuple[str, ...], str], ...]] = {
+    "EASY": (
+        (("4", "8"), "7"),
+        (("7", "7", "2"), "4"),
+        (("A", "4", "4"), "3"),
+        (("2", "6"), "6"),
+        (("4", "4"), "J"),
+        (("5", "Q"), "4"),
+        (("Q", "5"), "3"),
+        (("7", "7"), "4"),
+        (("2", "2", "3", "3", "4"), "6"),
+        (("A", "2", "2", "2", "3", "3"), "5"),
+    ),
+    "MEDIUM": (
+        (("8", "6"), "7"),
+        (("5", "9"), "K"),
+        (("2", "Q"), "2"),
+        (("5", "2", "Q"), "8"),
+        (("J", "4"), "Q"),
+        (("8", "5", "2"), "8"),
+        (("7", "5", "A"), "2"),
+        (("J", "5"), "8"),
+        (("4", "K"), "7"),
+        (("J", "3"), "4"),
+        (("2", "8", "4"), "A"),
+        (("5", "9", "2"), "7"),
+        (("4", "K"), "4"),
+        (("A", "4", "9"), "A"),
+        (("5", "8"), "6"),
+        (("6", "8"), "3"),
+        (("5", "9"), "3"),
+        (("8", "6"), "10"),
+        (("2", "2", "3", "3", "4"), "8"),
+        (("A", "2", "2", "3", "4"), "6"),
+        (("2", "2", "2", "3", "3", "4"), "7"),
+    ),
+    "HARD": (
+        (("7", "5"), "2"),
+        (("3", "Q", "3"), "Q"),
+        (("2", "J"), "4"),
+        (("K", "6"), "J"),
+        (("6", "7", "A"), "J"),
+        (("A", "7"), "Q"),
+        (("8", "4", "A", "2"), "Q"),
+        (("A", "7", "8"), "J"),
+        (("K", "2"), "4"),
+        (("6", "A", "A"), "6"),
+        (("K", "3", "3"), "8"),
+        (("Q", "5"), "9"),
+        (("A", "2", "2", "3", "4"), "3"),
+        (("A", "2", "2", "2", "3", "3"), "2"),
+        (("2", "2", "2", "3", "3", "4"), "10"),
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -26,15 +87,15 @@ class Scenario:
     dealer_upcard: Card
 
     @property
-    def key(self):
-        # Suits do not change strategy. Rank/softness state is the cache key,
-        # while the original cards remain available for exact deck removal.
-        player_ranks = tuple(sorted(rank for rank, _ in self.player_cards))
-        return player_ranks + (self.dealer_upcard[0],)
+    def key(self) -> tuple[str, ...]:
+        # Suits do not affect HIT/STAND EV, but rank multiplicity does.
+        return tuple(sorted(rank for rank, _ in self.player_cards)) + (self.dealer_upcard[0],)
 
 
-@dataclass
+@dataclass(frozen=True)
 class SimulationStats:
+    """Exact outcome probabilities; retained name for compatibility."""
+
     win_probability: float
     loss_probability: float
     push_probability: float
@@ -52,41 +113,44 @@ def card_value(rank: str) -> int:
     return int(rank)
 
 
-def hand_value(cards: list[Card]) -> tuple[int, bool]:
-    total = sum(card_value(rank) for rank, _ in cards)
+def hand_value(cards: list[Card] | tuple[Card, ...]) -> tuple[int, bool]:
+    hard_total = sum(RANK_HARD_VALUES[RANK_INDEX[rank]] for rank, _ in cards)
     aces = sum(rank == "A" for rank, _ in cards)
-    while total > 21 and aces:
-        total -= 10
-        aces -= 1
-    return total, aces > 0
+    return _best_total(hard_total, aces)
 
 
-def continuation_action(cards: list[Card], dealer_upcard: Card) -> str:
-    """Small fixed basic-strategy policy used only after an initial HIT."""
-    total, soft = hand_value(cards)
-    dealer = card_value(dealer_upcard[0])
-    if soft:
-        if total >= 19:
-            return "stand"
-        if total == 18 and dealer in {2, 7, 8}:
-            return "stand"
-        return "hit"
-    if total >= 17:
-        return "stand"
-    if total >= 13 and dealer <= 6:
-        return "stand"
-    if total == 12 and dealer in {4, 5, 6}:
-        return "stand"
-    return "hit"
+def _hand_state(cards: list[Card] | tuple[Card, ...]) -> tuple[int, int]:
+    return (
+        sum(RANK_HARD_VALUES[RANK_INDEX[rank]] for rank, _ in cards),
+        sum(rank == "A" for rank, _ in cards),
+    )
+
+
+def _best_total(hard_total: int, aces: int) -> tuple[int, bool]:
+    soft = aces > 0 and hard_total + 10 <= 21
+    return hard_total + (10 if soft else 0), soft
+
+
+def _add_rank(hard_total: int, aces: int, rank_index: int) -> tuple[int, int]:
+    return hard_total + RANK_HARD_VALUES[rank_index], aces + int(RANKS[rank_index] == "A")
+
+
+def _terminal_stats(player_total: int, dealer_total: int) -> SimulationStats:
+    if dealer_total > 21 or player_total > dealer_total:
+        return SimulationStats(1.0, 0.0, 0.0)
+    if player_total < dealer_total:
+        return SimulationStats(0.0, 1.0, 0.0)
+    return SimulationStats(0.0, 0.0, 1.0)
 
 
 class BlackjackEngine:
-    """Evaluates exact visible blackjack states without blocking render frames."""
+    """Memoized exact evaluator for one-deck HIT/STAND decisions."""
 
-    def __init__(self, seed: int | None = None, simulations: int = SIMULATIONS_PER_ACTION):
+    def __init__(self, seed: int | None = None, simulations: int | None = None):
+        # ``simulations`` remains accepted so older callers do not break. It is
+        # intentionally unused: decision EV is exact.
         self.random = random.Random(seed)
-        self.simulations = simulations
-        self.cache: dict[tuple, dict[str, SimulationStats]] = {}
+        self.cache: dict[tuple[str, ...], dict[str, SimulationStats]] = {}
 
     @staticmethod
     def deck() -> list[Card]:
@@ -102,112 +166,235 @@ class BlackjackEngine:
             return "MEDIUM"
         return "HARD"
 
-    def _draw(self, deck: list[Card]) -> Card:
-        return deck.pop(self.random.randrange(len(deck)))
+    @staticmethod
+    def _decrement(counts: tuple[int, ...], rank_index: int) -> tuple[int, ...]:
+        mutable = list(counts)
+        mutable[rank_index] -= 1
+        return tuple(mutable)
 
-    def _dealer_total(self, dealer_cards: list[Card], deck: list[Card]) -> int:
-        while hand_value(dealer_cards)[0] < 17:
-            dealer_cards.append(self._draw(deck))
-        return hand_value(dealer_cards)[0]
+    @staticmethod
+    def _weighted(branches: list[tuple[float, SimulationStats]]) -> SimulationStats:
+        return SimulationStats(
+            sum(probability * stats.win_probability for probability, stats in branches),
+            sum(probability * stats.loss_probability for probability, stats in branches),
+            sum(probability * stats.push_probability for probability, stats in branches),
+        )
 
-    def _finish(self, player_total: int, dealer_upcard: Card, deck: list[Card], player_cards: list[Card]) -> str:
-        if player_total > 21:
-            return "loss"
-        dealer_cards = [dealer_upcard, self._draw(deck)]
-        dealer_total = self._dealer_total(dealer_cards, deck)
-        if dealer_total > 21 or player_total > dealer_total:
+    def _remaining_counts(self, scenario: Scenario) -> tuple[int, ...]:
+        visible = list(scenario.player_cards) + [scenario.dealer_upcard]
+        if len(scenario.player_cards) < 2:
+            raise ValueError("A decision scenario needs at least two player cards")
+        if len(visible) != len(set(visible)):
+            raise ValueError("A visible card appears more than once")
+        counts = [4] * len(RANKS)
+        for rank, suit in visible:
+            if rank not in RANK_INDEX or suit not in SUITS:
+                raise ValueError(f"Invalid card: {(rank, suit)!r}")
+            counts[RANK_INDEX[rank]] -= 1
+            if counts[RANK_INDEX[rank]] < 0:
+                raise ValueError(f"Impossible visible-card multiplicity for {rank}")
+        total, _ = hand_value(scenario.player_cards)
+        if total >= 21:
+            raise ValueError("Decision scenarios must have a live total below 21")
+        return tuple(counts)
+
+    @lru_cache(maxsize=None)
+    def _dealer_play(
+        self,
+        player_total: int,
+        dealer_hard_total: int,
+        dealer_aces: int,
+        counts: tuple[int, ...],
+    ) -> SimulationStats:
+        dealer_total, _ = _best_total(dealer_hard_total, dealer_aces)
+        if dealer_total >= 17 or not sum(counts):
+            return _terminal_stats(player_total, dealer_total)
+        remaining = sum(counts)
+        branches = []
+        for rank_index, count in enumerate(counts):
+            if not count:
+                continue
+            next_hard, next_aces = _add_rank(dealer_hard_total, dealer_aces, rank_index)
+            branches.append((
+                count / remaining,
+                self._dealer_play(
+                    player_total,
+                    next_hard,
+                    next_aces,
+                    self._decrement(counts, rank_index),
+                ),
+            ))
+        return self._weighted(branches)
+
+    @lru_cache(maxsize=None)
+    def _stand_stats(
+        self,
+        player_hard_total: int,
+        player_aces: int,
+        dealer_rank_index: int,
+        counts: tuple[int, ...],
+    ) -> SimulationStats:
+        player_total, _ = _best_total(player_hard_total, player_aces)
+        dealer_hard, dealer_aces = _add_rank(0, 0, dealer_rank_index)
+        remaining = sum(counts)
+        if not remaining:
+            dealer_total, _ = _best_total(dealer_hard, dealer_aces)
+            return _terminal_stats(player_total, dealer_total)
+        branches = []
+        # The first dealer draw is the hidden card, even when the upcard alone
+        # would look like a standing total.
+        for rank_index, count in enumerate(counts):
+            if not count:
+                continue
+            hidden_hard, hidden_aces = _add_rank(dealer_hard, dealer_aces, rank_index)
+            branches.append((
+                count / remaining,
+                self._dealer_play(
+                    player_total,
+                    hidden_hard,
+                    hidden_aces,
+                    self._decrement(counts, rank_index),
+                ),
+            ))
+        return self._weighted(branches)
+
+    @lru_cache(maxsize=None)
+    def _hit_stats(
+        self,
+        player_hard_total: int,
+        player_aces: int,
+        dealer_rank_index: int,
+        counts: tuple[int, ...],
+    ) -> SimulationStats:
+        remaining = sum(counts)
+        if not remaining:
+            return self._stand_stats(player_hard_total, player_aces, dealer_rank_index, counts)
+        branches = []
+        for rank_index, count in enumerate(counts):
+            if not count:
+                continue
+            next_hard, next_aces = _add_rank(player_hard_total, player_aces, rank_index)
+            next_counts = self._decrement(counts, rank_index)
+            next_total, _ = _best_total(next_hard, next_aces)
+            continuation = (
+                SimulationStats(0.0, 1.0, 0.0)
+                if next_total > 21
+                else self._optimal_continuation(next_hard, next_aces, dealer_rank_index, next_counts)
+            )
+            branches.append((count / remaining, continuation))
+        return self._weighted(branches)
+
+    @lru_cache(maxsize=None)
+    def _optimal_continuation(
+        self,
+        player_hard_total: int,
+        player_aces: int,
+        dealer_rank_index: int,
+        counts: tuple[int, ...],
+    ) -> SimulationStats:
+        stand = self._stand_stats(player_hard_total, player_aces, dealer_rank_index, counts)
+        hit = self._hit_stats(player_hard_total, player_aces, dealer_rank_index, counts)
+        return hit if hit.ev > stand.ev else stand
+
+    def evaluate(self, scenario: Scenario) -> dict[str, SimulationStats]:
+        cached = self.cache.get(scenario.key)
+        if cached is not None:
+            return cached
+        counts = self._remaining_counts(scenario)
+        player_hard, player_aces = _hand_state(scenario.player_cards)
+        dealer_rank_index = RANK_INDEX[scenario.dealer_upcard[0]]
+        stats = {
+            "hit": self._hit_stats(player_hard, player_aces, dealer_rank_index, counts),
+            "stand": self._stand_stats(player_hard, player_aces, dealer_rank_index, counts),
+        }
+        self.cache[scenario.key] = stats
+        return stats
+
+    def sample_outcome(self, stats: SimulationStats) -> str:
+        draw = self.random.random()
+        if draw < stats.win_probability:
             return "win"
-        if player_total < dealer_total:
+        if draw < stats.win_probability + stats.loss_probability:
             return "loss"
         return "push"
 
-    def _simulate_action(self, scenario: Scenario, action: str, simulations: int | None = None) -> SimulationStats:
-        counts = {"win": 0, "loss": 0, "push": 0}
-        visible = list(scenario.player_cards) + [scenario.dealer_upcard]
-        simulation_count = simulations or self.simulations
-        for _ in range(simulation_count):
-            deck = [card for card in self.deck() if card not in visible]
-            player_cards = list(scenario.player_cards)
-            if action == "hit":
-                player_cards.append(self._draw(deck))
-                while hand_value(player_cards)[0] <= 21 and continuation_action(player_cards, scenario.dealer_upcard) == "hit":
-                    player_cards.append(self._draw(deck))
-            total, _ = hand_value(player_cards)
-            counts[self._finish(total, scenario.dealer_upcard, deck, player_cards)] += 1
-        n = float(simulation_count)
-        return SimulationStats(counts["win"] / n, counts["loss"] / n, counts["push"] / n)
-
-    def approximate(self, scenario: Scenario) -> dict[str, SimulationStats]:
-        """Cheap scenario filter used before a round becomes visible."""
-        return {
-            "hit": self._simulate_action(scenario, "hit", SCENARIO_FILTER_SIMULATIONS),
-            "stand": self._simulate_action(scenario, "stand", SCENARIO_FILTER_SIMULATIONS),
-        }
-
-    def evaluate(self, scenario: Scenario) -> dict[str, SimulationStats]:
-        if scenario.key not in self.cache:
-            self.cache[scenario.key] = {
-                "hit": self._simulate_action(scenario, "hit"),
-                "stand": self._simulate_action(scenario, "stand"),
-            }
-        return self.cache[scenario.key]
-
     def resolve(self, scenario: Scenario, action: str) -> str:
-        """Run one real random completion after the decision is locked."""
-        visible = list(scenario.player_cards) + [scenario.dealer_upcard]
-        deck = [card for card in self.deck() if card not in visible]
-        player_cards = list(scenario.player_cards)
-        if action == "hit":
-            player_cards.append(self._draw(deck))
-            while hand_value(player_cards)[0] <= 21 and continuation_action(player_cards, scenario.dealer_upcard) == "hit":
-                player_cards.append(self._draw(deck))
-        total, _ = hand_value(player_cards)
-        return self._finish(total, scenario.dealer_upcard, deck, player_cards)
+        """Sample one casino outcome from the chosen action's exact distribution."""
+        return self.sample_outcome(self.evaluate(scenario)[action])
 
-    def generate_scenario(self, target: str | None = None, used: set[tuple] | None = None) -> tuple[Scenario, dict[str, SimulationStats], str]:
+    def _random_scenario(self) -> Scenario:
+        deck = self.deck()
+        self.random.shuffle(deck)
+        hand_size = self.random.choices((2, 3, 4, 5, 6), weights=(24, 32, 28, 12, 4))[0]
+        player_cards = tuple(deck.pop() for _ in range(hand_size))
+        return Scenario(player_cards, deck.pop())
+
+    def _scenario_from_blueprint(self, player_ranks: tuple[str, ...], dealer_rank: str) -> Scenario:
+        available = {
+            rank: [(rank, suit) for suit in SUITS]
+            for rank in RANKS
+        }
+        for cards in available.values():
+            self.random.shuffle(cards)
+        player_cards = tuple(available[rank].pop() for rank in player_ranks)
+        dealer_upcard = available[dealer_rank].pop()
+        return Scenario(player_cards, dealer_upcard)
+
+    def generate_scenario(
+        self,
+        target: str | None = None,
+        used: set[tuple[str, ...]] | None = None,
+    ) -> tuple[Scenario, dict[str, SimulationStats], str]:
+        """Generate a legal decision state in the requested exact-EV category."""
         used = used or set()
-        fallback = None
-        for _ in range(500):
-            cards = self.deck()
-            player_cards = (self._draw(cards), self._draw(cards))
-            dealer_upcard = self._draw(cards)
-            scenario = Scenario(player_cards, dealer_upcard)
+        if target in SCENARIO_BLUEPRINTS:
+            blueprints = list(SCENARIO_BLUEPRINTS[target])
+            self.random.shuffle(blueprints)
+            for player_ranks, dealer_rank in blueprints:
+                scenario = self._scenario_from_blueprint(player_ranks, dealer_rank)
+                if scenario.key in used:
+                    continue
+                player_total, _ = hand_value(scenario.player_cards)
+                if player_total >= 21:
+                    continue
+                stats = self.evaluate(scenario)
+                margin = abs(stats["hit"].ev - stats["stand"].ev)
+                if margin >= VERY_OBVIOUS_MARGIN:
+                    continue
+                difficulty = self.difficulty(margin)
+                if difficulty == target:
+                    return scenario, stats, difficulty
+
+        # Keep a fully dynamic fallback for callers requesting no category and
+        # for future threshold changes that invalidate a blueprint.
+        fallback: tuple[Scenario, dict[str, SimulationStats], str] | None = None
+        target_order = {"HARD": 0, "MEDIUM": 1, "EASY": 2, "VERY_OBVIOUS": 3}
+        best_distance = float("inf")
+        for _ in range(600):
+            scenario = self._random_scenario()
             if scenario.key in used:
                 continue
-            total, _ = hand_value(list(player_cards))
-            if total > 21:
+            total, _ = hand_value(scenario.player_cards)
+            if total >= 21:
                 continue
             stats = self.evaluate(scenario)
             margin = abs(stats["hit"].ev - stats["stand"].ev)
             difficulty = self.difficulty(margin)
-            fallback = (scenario, stats, difficulty)
+            if difficulty == "VERY_OBVIOUS":
+                continue
+            candidate = (scenario, stats, difficulty)
             if target is None or difficulty == target:
-                return fallback
+                return candidate
+            distance = abs(target_order[difficulty] - target_order.get(target, target_order[difficulty]))
+            if distance < best_distance:
+                fallback, best_distance = candidate, distance
         if fallback is None:
-            raise RuntimeError("Unable to generate a blackjack scenario")
+            raise RuntimeError("Unable to generate a legal non-trivial Blackjack scenario")
         return fallback
 
-    def generate_raw_scenario(self, used: set[tuple] | None = None, target: str | None = None) -> Scenario:
-        """Generate a legal, varied scenario using only cheap filtering."""
-        used = used or set()
-        for _ in range(500):
-            cards = self.deck()
-            hand_size = self.random.choices((2, 3, 4, 5), weights=(45, 30, 20, 5))[0]
-            player_cards = tuple(self._draw(cards) for _ in range(hand_size))
-            scenario = Scenario(player_cards, self._draw(cards))
-            if scenario.key in used:
-                continue
-            total, _ = hand_value(list(scenario.player_cards))
-            if total <= 21:
-                approximate = self.approximate(scenario)
-                difficulty = self.difficulty(abs(approximate["hit"].ev - approximate["stand"].ev))
-                if target is None or difficulty == target or (target == "EASY" and difficulty == "VERY_OBVIOUS"):
-                    return scenario
-        # Never leave the table stuck if a narrow target is unlucky.
-        for _ in range(500):
-            cards = self.deck()
-            hand_size = self.random.choice((2, 3, 4))
-            scenario = Scenario(tuple(self._draw(cards) for _ in range(hand_size)), self._draw(cards))
-            if scenario.key not in used and hand_value(list(scenario.player_cards))[0] <= 21:
-                return scenario
-        raise RuntimeError("Unable to generate a unique blackjack scenario")
+    def generate_raw_scenario(
+        self,
+        used: set[tuple[str, ...]] | None = None,
+        target: str | None = None,
+    ) -> Scenario:
+        return self.generate_scenario(target=target, used=used)[0]

@@ -532,7 +532,7 @@ def main() -> None:
                     elif nearest[2] == "blackjack":
                         audio.stop_footsteps()
                         show_tutorial = False
-                        blackjack_game = BlackjackGame(screen, player_state)
+                        blackjack_game = BlackjackGame(screen, player_state, menu_audio=menu.audio)
                         mode = "blackjack"
                     elif nearest[2] == "slots":
                         audio.stop_footsteps()
