@@ -15,9 +15,13 @@ DATABASE_URL = os.getenv(
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=5,
     pool_timeout=3,
+    pool_recycle=300,
     connect_args={
         "connect_timeout": 3,
+        "application_name": "the-house-of-you-api",
     },
 )
 
@@ -26,7 +30,6 @@ def check_database() -> bool:
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
-
         return True
     except Exception:
         return False
