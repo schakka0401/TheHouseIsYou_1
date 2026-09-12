@@ -111,7 +111,10 @@ class MenuButton:
 
     def draw(self, surface: pygame.Surface, now: int) -> None:
         is_pressed = now < self.pressed_until
-        selected = self.selected or self.hovered
+        # Selection is owned by MainMenu's input mode. Do not OR this with a
+        # stale hover flag: keyboard navigation must be able to clear mouse
+        # ownership until the mouse actually moves again.
+        selected = self.selected
         scale = 0.985 if is_pressed else (1.015 if selected else 1.0)
         width = int(self.base_rect.width * scale)
         height = int(self.base_rect.height * scale)
@@ -166,6 +169,8 @@ class MainMenu:
         ]
         self.selected_index = 0
         self.buttons[0].selected = True
+        self.input_mode = "mouse"
+        self.previous_mouse_position = pygame.mouse.get_pos()
         self.started_at = pygame.time.get_ticks()
 
     def update_viewport(self) -> None:
@@ -189,6 +194,11 @@ class MainMenu:
         self.selected_index = index % len(self.buttons)
         for button_index, button in enumerate(self.buttons):
             button.selected = button_index == self.selected_index
+            button.hovered = False
+
+    def choose_from_mouse(self, index: int) -> None:
+        self.input_mode = "mouse"
+        self.choose(index)
 
     def move_selection(self, amount: int) -> None:
         self.choose(self.selected_index + amount)
@@ -206,24 +216,33 @@ class MainMenu:
             self.update_viewport()
         elif event.type == pygame.KEYDOWN:
             if event.key in (pygame.K_UP, pygame.K_w):
+                self.input_mode = "keyboard"
                 self.move_selection(-1)
             elif event.key in (pygame.K_DOWN, pygame.K_s):
+                self.input_mode = "keyboard"
                 self.move_selection(1)
             elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
                 return self.activate(now)
             elif event.key in (pygame.K_ESCAPE, pygame.K_q):
                 return False
         elif event.type == pygame.MOUSEMOTION:
-            point = self.screen_to_virtual(event.pos)
-            for index, button in enumerate(self.buttons):
-                button.hovered = point is not None and button.contains_point(point)
-                if button.hovered:
-                    self.choose(index)
-        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            moved = event.pos != self.previous_mouse_position
+            self.previous_mouse_position = event.pos
+            if not moved:
+                return True
+
+            self.input_mode = "mouse"
             point = self.screen_to_virtual(event.pos)
             for index, button in enumerate(self.buttons):
                 if point is not None and button.contains_point(point):
-                    self.choose(index)
+                    self.choose_from_mouse(index)
+                    break
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            self.previous_mouse_position = event.pos
+            point = self.screen_to_virtual(event.pos)
+            for index, button in enumerate(self.buttons):
+                if point is not None and button.contains_point(point):
+                    self.choose_from_mouse(index)
                     return self.activate(now)
         return True
 
