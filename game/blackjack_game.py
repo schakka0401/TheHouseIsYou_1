@@ -25,10 +25,17 @@ DEBUG_RESULTS_LAYOUT = False
 
 CONFIDENCE_TRACK = pygame.Rect(55, 535, 330, 14)
 CONFIDENCE_CONFIRM = pygame.Rect(410, 515, 180, 54)
-WAGER_FIELD = pygame.Rect(650, 520, 170, 50)
-WAGER_CONFIRM = pygame.Rect(845, 515, 195, 54)
-HIT_BUTTON = pygame.Rect(400, 600, 220, 55)
-STAND_BUTTON = pygame.Rect(660, 600, 220, 55)
+WAGER_FIELD = pygame.Rect(650, 558, 170, 42)
+WAGER_CONFIRM = pygame.Rect(845, 552, 195, 48)
+HIT_BUTTON = pygame.Rect(400, 610, 220, 55)
+STAND_BUTTON = pygame.Rect(660, 610, 220, 55)
+
+CHIP_VALUES = (1, 5, 10, 25, 50, 100)
+CHIP_COLORS = ("white", "red", "blue", "green", "black", "purple")
+CHIP_SOURCE_SIZE = (54, 54)
+CHIP_DISPLAY_SIZE = (36, 36)
+CHIP_TRAY_ORIGIN = (650, 480)
+CHIP_TRAY_STEP = (46, 38)
 
 DEALER_COMMENTS = (
     "Confidence can be expensive.",
@@ -110,12 +117,17 @@ class BlackjackGame:
         self.pending_rematch_at: int | None = None
 
         self.card_images: dict[tuple[str, str], pygame.Surface] = {}
+        self.chip_images: dict[int, pygame.Surface] = {}
+        self.chip_rects: list[tuple[pygame.Rect, int]] = []
+        self.selected_chips: list[int] = []
+        self.selected_chip_rects: list[tuple[pygame.Rect, int]] = []
         self.title_font = pygame.font.Font(None, 42)
         self.font = pygame.font.Font(None, 27)
         self.small_font = pygame.font.Font(None, 22)
         symbol_font = pygame.font.match_font("segoeuisymbol")
         self.action_font = pygame.font.Font(symbol_font, 25) if symbol_font else self.font
         self._load_card_images()
+        self._load_chip_images()
         if self.dealer_voice is not None:
             entry_context = self._voice_context("entry")
             self.dealer_voice.clear_stale_dealer_lines(entry_context, include_high=True)
@@ -170,6 +182,34 @@ class BlackjackGame:
             image = pygame.image.load(path).convert_alpha()
             self.card_images[(rank, parts[1])] = pygame.transform.smoothscale(image, (105, 147))
 
+    def _load_chip_images(self) -> None:
+        """Preload the partner's chip artwork once for click-to-wager betting."""
+        chip_root = Path(__file__).resolve().parents[1] / "static" / "assets" / "Card_Game_GFX" / "Chips"
+        for value, color in zip(CHIP_VALUES, CHIP_COLORS):
+            path = chip_root / f"chips_stacked_{color}.png"
+            if not path.exists():
+                print(f"Blackjack chip asset missing for {value}: {path}")
+                continue
+            image = pygame.image.load(path).convert_alpha()
+            self.chip_images[value] = pygame.transform.smoothscale(image, CHIP_SOURCE_SIZE)
+
+    def _chip_rects_for_screen(self) -> list[tuple[pygame.Rect, int]]:
+        """Return the stable two-row chip tray hitboxes used by draw and input."""
+        origin_x, origin_y = CHIP_TRAY_ORIGIN
+        step_x, step_y = CHIP_TRAY_STEP
+        return [
+            (
+                pygame.Rect(
+                    origin_x + column * step_x,
+                    origin_y + row * step_y,
+                    *CHIP_DISPLAY_SIZE,
+                ),
+                value,
+            )
+            for row in range(2)
+            for column, value in enumerate(CHIP_VALUES[row * 3:(row + 1) * 3])
+        ]
+
     def start_new_session(self) -> None:
         """Future rematches use the same complete ten-round assessment."""
         self.voice_session_number += 1
@@ -218,6 +258,8 @@ class BlackjackGame:
         self.wager_confirmed = False
         self.current_bet = 0
         self.wager_focused = False
+        self.selected_chips.clear()
+        self.chip_rects = self._chip_rects_for_screen()
         self.hovered_action = None
         self.pressed_action = None
         self.pending_record = None
@@ -254,6 +296,32 @@ class BlackjackGame:
             self.current_bet = 0
             self.hovered_action = None
 
+    def _set_chip_wager(self, value: int) -> None:
+        """Add one clicked chip and invalidate a previous wager confirmation."""
+        if value not in CHIP_VALUES:
+            return
+        total = sum(self.selected_chips)
+        if total + value > self.player_state.chips:
+            return
+        self.selected_chips.append(value)
+        self.wager_text = str(total + value)
+        self.wager_confirmed = False
+        self.current_bet = 0
+        self.wager_focused = True
+        self.hovered_action = None
+
+    def _remove_selected_chip(self, position: tuple[int, int]) -> bool:
+        """Remove the clicked top chip from the wager stack."""
+        for rect, _value in self.selected_chip_rects:
+            if rect.collidepoint(position):
+                self.selected_chips.pop()
+                self.wager_text = str(sum(self.selected_chips)) if self.selected_chips else ""
+                self.wager_confirmed = False
+                self.current_bet = 0
+                self.hovered_action = None
+                return True
+        return False
+
     def _confirm_wager(self) -> None:
         if self._valid_wager():
             self.current_bet = int(self.wager_text)
@@ -289,6 +357,9 @@ class BlackjackGame:
 
         self.analysis_thread = threading.Thread(target=analyze_session, daemon=True)
         self.analysis_thread.start()
+
+    def _restart_session(self) -> None:
+        self.__init__(self.screen, self.player_state)
 
     def _analysis_progress(self, completed: int, total: int) -> None:
         self.analysis_completed = completed
@@ -455,7 +526,15 @@ class BlackjackGame:
             elif CONFIDENCE_CONFIRM.collidepoint(event.pos):
                 self.wager_focused = False
                 self._confirm_confidence()
+            elif any(rect.collidepoint(event.pos) for rect, _value in self.chip_rects):
+                for rect, value in self.chip_rects:
+                    if rect.collidepoint(event.pos):
+                        self._set_chip_wager(value)
+                        break
+            elif self._remove_selected_chip(event.pos):
+                self.wager_focused = True
             elif WAGER_FIELD.collidepoint(event.pos):
+                # Wagers are made with chips. The field is a read-only summary.
                 self.wager_focused = True
             elif WAGER_CONFIRM.collidepoint(event.pos):
                 self.wager_focused = True
@@ -479,14 +558,14 @@ class BlackjackGame:
                 elif not self.wager_confirmed:
                     self._confirm_wager()
             elif event.key == pygame.K_BACKSPACE:
-                self.wager_focused = True
-                self._set_wager_text(self.wager_text[:-1])
+                if self.selected_chips:
+                    self.selected_chips.pop()
+                    self.wager_text = str(sum(self.selected_chips)) if self.selected_chips else ""
+                    self.wager_confirmed = False
+                    self.current_bet = 0
             elif pygame.K_0 <= event.key <= pygame.K_9:
                 digit = event.key - pygame.K_0
-                if self.wager_focused or self.confidence_confirmed:
-                    self.wager_focused = True
-                    self._set_wager_text(self.wager_text + str(digit))
-                else:
+                if not self.confidence_confirmed:
                     self._set_confidence(10 if digit == 0 else digit)
             elif self.actions_enabled and event.key == pygame.K_h:
                 self._take_action("hit")
@@ -554,16 +633,51 @@ class BlackjackGame:
         self._text(confidence_text, (150, 558), 22, "#f1d277")
         self._draw_small_button(CONFIDENCE_CONFIRM, "CONFIRM", self.confidence_confirmed, self.confidence_level is not None)
 
-        self._text(f"WAGER (1-{self.player_state.chips})", (650, 490), 22, "#d8d0b8")
+        self._text(f"WAGER (1-{self.player_state.chips})", (650, 438), 22, "#d8d0b8")
+        self._text("CLICK CHIPS TO BUILD YOUR WAGER", (650, 462), 16, "#b9ad8f")
+        self._draw_wager_chips()
         field_color = "#f1d277" if self.wager_focused else "#b88732"
         pygame.draw.rect(self.screen, "#24170f", WAGER_FIELD, border_radius=8)
         pygame.draw.rect(self.screen, field_color, WAGER_FIELD, width=2, border_radius=8)
         wager = self.font.render(f"{self.wager_text or '_'} CHIPS", True, "#f1d277")
-        self.screen.blit(wager, wager.get_rect(center=WAGER_FIELD.center))
+        wager_center = (WAGER_FIELD.centerx + (14 if self.selected_chips else 0), WAGER_FIELD.centery)
+        self._draw_selected_chips()
+        self.screen.blit(wager, wager.get_rect(center=wager_center))
         self._draw_small_button(WAGER_CONFIRM, "CONFIRM", self.wager_confirmed, self._valid_wager())
 
         self._draw_action_button(HIT_BUTTON, "hit", "♠  HIT  ♥", "#286db2")
         self._draw_action_button(STAND_BUTTON, "stand", "♦  STAND  ♣", "#b52f38")
+
+    def _draw_wager_chips(self) -> None:
+        self.chip_rects = self._chip_rects_for_screen()
+        for rect, value in self.chip_rects:
+            image = self.chip_images.get(value)
+            if image is None:
+                continue
+            chip = pygame.transform.smoothscale(image, CHIP_DISPLAY_SIZE)
+            if value > self.player_state.chips:
+                chip = chip.copy()
+                chip.set_alpha(80)
+            self.screen.blit(chip, rect)
+            value_surface = pygame.font.Font(None, 16).render(str(value), True, "#24170f")
+            self.screen.blit(value_surface, value_surface.get_rect(center=rect.center))
+
+    def _draw_selected_chips(self) -> None:
+        """Show a compact removable stack inside the wager summary field."""
+        self.selected_chip_rects = []
+        if not self.selected_chips:
+            return
+        visible_layers = min(len(self.selected_chips), 8)
+        base = pygame.Rect(WAGER_FIELD.left + 6, WAGER_FIELD.top + 3, 30, 30)
+        click_rect = base.move(0, -(visible_layers - 1) * 2)
+        click_rect.height += (visible_layers - 1) * 2
+        self.selected_chip_rects.append((click_rect, self.selected_chips[-1]))
+        for index, value in enumerate(self.selected_chips[-visible_layers:]):
+            image = self.chip_images.get(value)
+            if image is None:
+                continue
+            chip = pygame.transform.smoothscale(image, base.size)
+            self.screen.blit(chip, base.move(0, -index * 2))
 
     def draw(self) -> None:
         self.screen.fill("#154734")

@@ -17,6 +17,9 @@ PLAYER_SIZE = (96, 96)
 PLAYER_COLLISION_SIZE = (32, 32)
 PLAYER_DISPLAY_SIZE = (72, 96)
 BARTENDER_DISPLAY_SIZE = (48, 72)
+STOOL_DISPLAY_SIZE = (42, 59)
+BEER_DISPLAY_SIZE = (18, 23)
+CUP_DISPLAY_SIZE = (16, 22)
 PLAYER_SPEED = 300
 PLAYER_ANIMATION_FRAME_DURATION = 0.12
 SLOT_MACHINE_ANIMATION_FRAME_DURATION = 0.15
@@ -27,6 +30,9 @@ PLAYER_SPRITE_DIRECTORY = ASSETS / "sprites"
 IMAGE_DIRECTORY = ASSETS / "images"
 CASINO_DIRECTORY = ASSETS / "2D Top Down Pixel Art Tileset Casino"
 BARTENDER_IMAGE = ASSETS / "bartender.png"
+STOOL_IMAGE = ASSETS / "stool.png"
+BEER_IMAGE = ASSETS / "beer.png"
+CUP_IMAGE = ASSETS / "cup.png"
 CHARACTER_SHEET = ASSETS / "2D Top Down Pixel Art Characters" / "000.png"
 CASINO_TILESET = CASINO_DIRECTORY / "2D_TopDown_Tileset_Casino_1024x512.png"
 SLOT_MACHINE_SHEET = CASINO_DIRECTORY / "Animated Sprite Sheets" / "SlotMachinesAnimationSheet_0.png"
@@ -122,6 +128,18 @@ SLOT_MACHINE_CENTERS = (
 )
 TABLE_INTERACTION_DISTANCE = 190
 SLOT_MACHINE_INTERACTION_DISTANCE = 120
+BEVERAGE_POSITIONS = ((600, 245), (640, 245), (680, 245))
+STOOL_POSITIONS = (
+    (200, 520),
+    (320, 560),
+    (440, 520),
+    (560, 345),
+    (640, 365),
+    (720, 345),
+    (860, 575),
+    (980, 575),
+    (1100, 575),
+)
 
 
 def load_player_animations() -> dict[str, list[pygame.Surface]]:
@@ -174,6 +192,24 @@ def load_bartender() -> pygame.Surface:
         cropped = image.subsurface((0, 0, *cell_size)).copy()
     cropped.set_colorkey((0, 0, 0))
     return pygame.transform.scale(cropped, BARTENDER_DISPLAY_SIZE)
+
+
+def load_stool() -> pygame.Surface:
+    image = pygame.image.load(STOOL_IMAGE).convert()
+    image.set_colorkey((0, 0, 0))
+    cropped = image.subsurface((400, 420, 450, 650)).copy()
+    cropped.set_colorkey((0, 0, 0))
+    return pygame.transform.scale(cropped, STOOL_DISPLAY_SIZE)
+
+
+def load_beer() -> pygame.Surface:
+    image = pygame.image.load(BEER_IMAGE).convert_alpha()
+    return pygame.transform.scale(image, BEER_DISPLAY_SIZE)
+
+
+def load_cup() -> pygame.Surface:
+    image = pygame.image.load(CUP_IMAGE).convert_alpha()
+    return pygame.transform.scale(image, CUP_DISPLAY_SIZE)
 
 
 def player_rect(position: pygame.Vector2) -> pygame.Rect:
@@ -249,6 +285,9 @@ def load_casino_scenes() -> tuple[
     pygame.Surface,
     pygame.Surface,
     list[pygame.Surface],
+    pygame.Surface,
+    pygame.Surface,
+    pygame.Surface,
 ]:
     """Load the room, tables, bartender, and drinks from the casino tileset."""
     tileset = pygame.image.load(CASINO_TILESET).convert_alpha()
@@ -268,6 +307,9 @@ def load_casino_scenes() -> tuple[
         load_bartender(),
         pygame.transform.scale(drink, (22, 45)),
         load_slot_machine_animation(),
+        load_stool(),
+        load_beer(),
+        load_cup(),
     )
 
 
@@ -279,23 +321,27 @@ def draw_room(
     background: pygame.Surface,
     tables: list[pygame.Surface],
     bartender: pygame.Surface,
+    stool: pygame.Surface,
     drink: pygame.Surface,
     slot_machine_frames: list[pygame.Surface],
     slot_machine_frame: int,
     show_tutorial: bool,
+    beer: pygame.Surface,
+    cup: pygame.Surface,
 ) -> None:
     screen.blit(background, (0, 0))
-    if show_tutorial:
-        draw_tutorial_path(screen, player, BLACKJACK_TABLE_CENTER)
     slot_machine = slot_machine_frames[slot_machine_frame]
     for center in SLOT_MACHINE_CENTERS:
         screen.blit(slot_machine, slot_machine.get_rect(center=center))
     screen.blit(tables[0], tables[0].get_rect(center=CARD_TABLE_CENTER))
-    screen.blit(bartender, bartender.get_rect(midbottom=(CENTER_TABLE_CENTER.x, CENTER_TABLE_CENTER.y - 30)))
+    screen.blit(bartender, bartender.get_rect(midbottom=(CENTER_TABLE_CENTER.x, CENTER_TABLE_CENTER.y - 15)))
     screen.blit(tables[1], tables[1].get_rect(center=CENTER_TABLE_CENTER))
-    for position in ((600, 220), (640, 205), (680, 220)):
-        screen.blit(drink, drink.get_rect(center=position))
+    for index, position in enumerate(BEVERAGE_POSITIONS):
+        beverage = beer if index == 0 else cup
+        screen.blit(beverage, beverage.get_rect(center=position))
     screen.blit(tables[2], tables[2].get_rect(center=BLACKJACK_TABLE_CENTER))
+    for position in STOOL_POSITIONS:
+        screen.blit(stool, stool.get_rect(center=position))
 
     screen.blit(font.render("THE HOUSE IS YOU  —  CASINO FLOOR", True, "#ffffff"), (40, 30))
     screen.blit(image, image.get_rect(center=player))
@@ -373,7 +419,7 @@ def main() -> None:
     try:
         player_animations = load_player_animations()
         deck = load_cards()
-        casino_background, casino_tables, bartender, drink, slot_machine_frames = load_casino_scenes()
+        casino_background, casino_tables, bartender, drink, slot_machine_frames, stool, beer, cup = load_casino_scenes()
         home_button_image, options_menu_image, settings_menu_image = load_ui_assets()
     except FileNotFoundError as error:
         pygame.quit()
@@ -582,7 +628,8 @@ def main() -> None:
             # input, interaction, animation, or footsteps run while paused.
             keys = pygame.key.get_pressed() if not game_menu_open and pending_home_open_at is None else None
             movement = pygame.Vector2(0, 0) if keys is None else pygame.Vector2(
-                keys[pygame.K_d] - keys[pygame.K_a], keys[pygame.K_s] - keys[pygame.K_w]
+                (keys[pygame.K_RIGHT] or keys[pygame.K_d]) - (keys[pygame.K_LEFT] or keys[pygame.K_a]),
+                (keys[pygame.K_DOWN] or keys[pygame.K_s]) - (keys[pygame.K_UP] or keys[pygame.K_w])
             )
             walking_input = movement.length_squared() > 0
             old_position = player.copy()
@@ -638,10 +685,13 @@ def main() -> None:
                 casino_background,
                 casino_tables,
                 bartender,
+                stool,
                 drink,
                 slot_machine_frames,
                 slot_machine_frame,
                 show_tutorial,
+                beer,
+                cup,
             )
 
             screen_width, screen_height = screen.get_size()

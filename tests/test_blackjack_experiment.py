@@ -168,6 +168,36 @@ class BlackjackLifecycleTests(unittest.TestCase):
             [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99],
         )
 
+    def test_chip_wagering_uses_clicks_and_requires_confirmation(self) -> None:
+        state = PlayerState(chips=200)
+        game = BlackjackGame(self.screen, state, seed=37)
+        game._set_confidence(6)
+        game._confirm_confidence()
+        game.draw()
+
+        chip_rect, chip_value = game.chip_rects[3]
+        game.handle_event(pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN,
+            {"button": 1, "pos": chip_rect.center},
+        ))
+        self.assertEqual(game.wager_text, str(chip_value))
+        self.assertFalse(game.wager_confirmed)
+        self.assertFalse(game.actions_enabled)
+
+        game.handle_event(pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN,
+            {"button": 1, "pos": WAGER_CONFIRM.center},
+        ))
+        self.assertTrue(game.wager_confirmed)
+        self.assertTrue(game.actions_enabled)
+
+        game.handle_event(pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN,
+            {"button": 1, "pos": chip_rect.center},
+        ))
+        self.assertFalse(game.wager_confirmed)
+        self.assertFalse(game.actions_enabled)
+
     def test_active_blackjack_owns_dealer_voice_and_queues_intro(self) -> None:
         calls: list[tuple] = []
 
