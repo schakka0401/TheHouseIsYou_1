@@ -630,7 +630,8 @@ def main() -> None:
             # input, interaction, animation, or footsteps run while paused.
             keys = pygame.key.get_pressed() if not game_menu_open and pending_home_open_at is None else None
             movement = pygame.Vector2(0, 0) if keys is None else pygame.Vector2(
-                keys[pygame.K_d] - keys[pygame.K_a], keys[pygame.K_s] - keys[pygame.K_w]
+                (keys[pygame.K_RIGHT] or keys[pygame.K_d]) - (keys[pygame.K_LEFT] or keys[pygame.K_a]),
+                (keys[pygame.K_DOWN] or keys[pygame.K_s]) - (keys[pygame.K_UP] or keys[pygame.K_w])
             )
             walking_input = movement.length_squared() > 0
             old_position = player.copy()
