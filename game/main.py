@@ -6,6 +6,8 @@ import random
 import pygame
 
 from game.menu import MainMenu
+from game.blackjack_game import BlackjackGame
+from game.player_state import PlayerState
 
 
 WINDOW_SIZE = (1280, 720)
@@ -94,25 +96,6 @@ def load_casino_scenes() -> tuple[list[pygame.Surface], list[pygame.Surface]]:
     return rooms, tables
 
 
-def card_value(name: str) -> int:
-    """Return a blackjack card value; aces start as 11."""
-    rank = name.split()[0]
-    if rank == "Ace":
-        return 11
-    if rank in {"King", "Queen", "Jack"}:
-        return 10
-    return int(rank)
-
-
-def hand_value(hand: list[tuple[str, pygame.Surface]]) -> int:
-    value = sum(card_value(name) for name, _ in hand)
-    aces = sum(name.startswith("Ace ") for name, _ in hand)
-    while value > 21 and aces:
-        value -= 10
-        aces -= 1
-    return value
-
-
 def draw_room(
     screen: pygame.Surface,
     player: pygame.Vector2,
@@ -157,35 +140,14 @@ def draw_card_game(screen: pygame.Surface, hand: list[tuple[str, pygame.Surface]
         screen.blit(label, label.get_rect(center=(x + CARD_SIZE[0] // 2, y + CARD_SIZE[1] + 25)))
 
 
-def draw_blackjack(
-    screen: pygame.Surface,
-    player_hand: list[tuple[str, pygame.Surface]],
-    dealer_hand: list[tuple[str, pygame.Surface]],
-    status: str,
-    title_font: pygame.font.Font,
-    font: pygame.font.Font,
-) -> None:
-    screen.fill("#154734")
-    screen.blit(title_font.render("Blackjack", True, "#f7e9b9"), (50, 35))
-    hint = "H: hit    S: stand    N: new round    ESC: return to room"
-    screen.blit(font.render(hint, True, "#ffffff"), (50, 100))
-    screen.blit(font.render(f"Dealer: {hand_value(dealer_hand)}", True, "#ffffff"), (50, 165))
-    screen.blit(font.render(f"You: {hand_value(player_hand)}", True, "#ffffff"), (50, 430))
-    if status:
-        message = title_font.render(status, True, "#f7e9b9")
-        screen.blit(message, message.get_rect(center=(WINDOW_SIZE[0] // 2, 130)))
-
-    for y, hand in ((205, dealer_hand), (470, player_hand)):
-        for index, (_, image) in enumerate(hand):
-            screen.blit(image, (50 + index * (CARD_SIZE[0] + 24), y))
-
-
 def main() -> None:
     pygame.init()
     screen = pygame.display.set_mode(WINDOW_SIZE, pygame.RESIZABLE)
     pygame.display.set_caption("The House Is You")
     clock = pygame.time.Clock()
     menu = MainMenu(screen)
+    player_state = PlayerState(chips=200)
+    blackjack_game: BlackjackGame | None = None
     title_font = pygame.font.Font(None, 54)
     font = pygame.font.Font(None, 30)
 
@@ -204,18 +166,7 @@ def main() -> None:
     mode = "menu"
     room = 0
     hand = random.sample(deck, min(HAND_SIZE, len(deck)))
-    blackjack_player: list[tuple[str, pygame.Surface]] = []
-    blackjack_dealer: list[tuple[str, pygame.Surface]] = []
-    blackjack_status = "Press N to deal"
     running = True
-
-    def new_blackjack_round() -> None:
-        nonlocal blackjack_player, blackjack_dealer, blackjack_status
-        blackjack_player = [random.choice(deck), random.choice(deck)]
-        blackjack_dealer = [random.choice(deck), random.choice(deck)]
-        blackjack_status = ""
-        if hand_value(blackjack_player) == 21:
-            blackjack_status = "Blackjack! Press N for a new round."
 
     while running:
         delta_time = clock.tick(60) / 1000
@@ -234,42 +185,30 @@ def main() -> None:
                 # Options is intentionally retained as the existing no-op
                 # until an options screen is added to the project.
                 continue
+            if mode == "blackjack" and blackjack_game is not None:
+                action = blackjack_game.handle_event(event)
+                if action == "room":
+                    mode = "room"
+                continue
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     mode = "room"
                 elif mode == "cards" and event.key == pygame.K_SPACE:
                     hand = random.sample(deck, min(HAND_SIZE, len(deck)))
-                elif mode == "blackjack":
-                    if event.key == pygame.K_n:
-                        new_blackjack_round()
-                    elif event.key == pygame.K_h and not blackjack_status:
-                        blackjack_player.append(random.choice(deck))
-                        if hand_value(blackjack_player) > 21:
-                            blackjack_status = "Bust! Dealer wins. Press N for a new round."
-                    elif event.key == pygame.K_s and not blackjack_status:
-                        while hand_value(blackjack_dealer) < 17:
-                            blackjack_dealer.append(random.choice(deck))
-                        player_score = hand_value(blackjack_player)
-                        dealer_score = hand_value(blackjack_dealer)
-                        if dealer_score > 21 or player_score > dealer_score:
-                            blackjack_status = "You win! Press N for a new round."
-                        elif player_score < dealer_score:
-                            blackjack_status = "Dealer wins. Press N for a new round."
-                        else:
-                            blackjack_status = "Push (tie). Press N for a new round."
                 elif mode == "room" and event.key == pygame.K_e and player.distance_to(pygame.Vector2(TABLE.center)) < 190:
                     if room == 0:
                         mode = "cards"
                     else:
+                        blackjack_game = BlackjackGame(screen, player_state)
                         mode = "blackjack"
-                        new_blackjack_round()
 
         if mode == "menu":
             menu.draw(now)
         elif mode == "cards":
             draw_card_game(screen, hand, title_font, font)
-        elif mode == "blackjack":
-            draw_blackjack(screen, blackjack_player, blackjack_dealer, blackjack_status, title_font, font)
+        elif mode == "blackjack" and blackjack_game is not None:
+            blackjack_game.update()
+            blackjack_game.draw()
         else:
             keys = pygame.key.get_pressed()
             movement = pygame.Vector2(keys[pygame.K_d] - keys[pygame.K_a], keys[pygame.K_s] - keys[pygame.K_w])
