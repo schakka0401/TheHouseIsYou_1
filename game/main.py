@@ -16,6 +16,7 @@ PLAYER_SIZE = (96, 96)
 PLAYER_COLLISION_SIZE = (32, 32)
 PLAYER_DISPLAY_SIZE = (72, 96)
 BARTENDER_DISPLAY_SIZE = (48, 72)
+STOOL_DISPLAY_SIZE = (42, 59)
 PLAYER_SPEED = 300
 PLAYER_ANIMATION_FRAME_DURATION = 0.12
 SLOT_MACHINE_ANIMATION_FRAME_DURATION = 0.15
@@ -25,6 +26,7 @@ CARD_DIRECTORY = ASSETS / "cards"
 PLAYER_SPRITE_DIRECTORY = ASSETS / "sprites"
 CASINO_DIRECTORY = ASSETS / "2D Top Down Pixel Art Tileset Casino"
 BARTENDER_IMAGE = ASSETS / "bartender.png"
+STOOL_IMAGE = ASSETS / "stool.png"
 CASINO_TILESET = CASINO_DIRECTORY / "2D_TopDown_Tileset_Casino_1024x512.png"
 SLOT_MACHINE_SHEET = CASINO_DIRECTORY / "Animated Sprite Sheets" / "SlotMachinesAnimationSheet_0.png"
 TABLE = pygame.Rect(465, 250, 350, 220)
@@ -41,6 +43,17 @@ SLOT_MACHINE_CENTERS = (
 )
 TABLE_INTERACTION_DISTANCE = 190
 SLOT_MACHINE_INTERACTION_DISTANCE = 120
+STOOL_POSITIONS = (
+    (180, 555),
+    (300, 575),
+    (420, 555),
+    (560, 345),
+    (640, 365),
+    (720, 345),
+    (860, 575),
+    (980, 575),
+    (1100, 575),
+)
 
 
 def load_player_animations() -> dict[str, list[pygame.Surface]]:
@@ -85,6 +98,14 @@ def load_bartender() -> pygame.Surface:
     cropped = image.subsurface((95, 100, 220, 415)).copy()
     cropped.set_colorkey((0, 0, 0))
     return pygame.transform.scale(cropped, BARTENDER_DISPLAY_SIZE)
+
+
+def load_stool() -> pygame.Surface:
+    image = pygame.image.load(STOOL_IMAGE).convert()
+    image.set_colorkey((0, 0, 0))
+    cropped = image.subsurface((400, 420, 450, 650)).copy()
+    cropped.set_colorkey((0, 0, 0))
+    return pygame.transform.scale(cropped, STOOL_DISPLAY_SIZE)
 
 
 def player_rect(position: pygame.Vector2) -> pygame.Rect:
@@ -160,6 +181,7 @@ def load_casino_scenes() -> tuple[
     pygame.Surface,
     pygame.Surface,
     list[pygame.Surface],
+    pygame.Surface,
 ]:
     """Load the room, tables, bartender, and drinks from the casino tileset."""
     tileset = pygame.image.load(CASINO_TILESET).convert_alpha()
@@ -179,6 +201,7 @@ def load_casino_scenes() -> tuple[
         load_bartender(),
         pygame.transform.scale(drink, (22, 45)),
         load_slot_machine_animation(),
+        load_stool(),
     )
 
 
@@ -190,6 +213,7 @@ def draw_room(
     background: pygame.Surface,
     tables: list[pygame.Surface],
     bartender: pygame.Surface,
+    stool: pygame.Surface,
     drink: pygame.Surface,
     slot_machine_frames: list[pygame.Surface],
     slot_machine_frame: int,
@@ -207,6 +231,8 @@ def draw_room(
     for position in ((600, 220), (640, 205), (680, 220)):
         screen.blit(drink, drink.get_rect(center=position))
     screen.blit(tables[2], tables[2].get_rect(center=BLACKJACK_TABLE_CENTER))
+    for position in STOOL_POSITIONS:
+        screen.blit(stool, stool.get_rect(center=position))
 
     screen.blit(font.render("THE HOUSE IS YOU  —  CASINO FLOOR", True, "#ffffff"), (40, 30))
     screen.blit(image, image.get_rect(center=player))
@@ -237,6 +263,7 @@ def draw_card_game(
     hand: list[tuple[str, pygame.Surface]],
     title_font: pygame.font.Font,
     font: pygame.font.Font,
+    confidence_percent: int,
 ) -> None:
     screen.fill("#154734")
     title = title_font.render("Poker Table", True, "#f7e9b9")
@@ -252,6 +279,23 @@ def draw_card_game(
         screen.blit(image, (x, y))
         label = font.render(name, True, "#ffffff")
         screen.blit(label, label.get_rect(center=(x + CARD_SIZE[0] // 2, y + CARD_SIZE[1] + 25)))
+    draw_confidence_slider(screen, confidence_percent, 570)
+
+
+def draw_confidence_slider(screen: pygame.Surface, confidence_percent: int, top: int) -> None:
+    left, width = 300, 680
+    pygame.draw.rect(screen, "#3b2418", (left, top, width, 18), border_radius=9)
+    fill_width = round(width * confidence_percent / 100)
+    if fill_width:
+        pygame.draw.rect(screen, "#d29a32", (left, top, fill_width, 18), border_radius=9)
+    pygame.draw.rect(screen, "#f1d277", (left - 2, top - 2, width + 4, 22), 2, border_radius=11)
+    pygame.draw.circle(screen, "#f7e9b9", (left + fill_width, top + 9), 12)
+    label = pygame.font.Font(None, 35).render(
+        f"Confidence: {confidence_percent}%",
+        True,
+        "#f1d277",
+    )
+    screen.blit(label, label.get_rect(center=(WINDOW_SIZE[0] // 2, top + 55)))
 
 
 def draw_slot_machine_game(
@@ -283,7 +327,7 @@ def main() -> None:
     try:
         player_animations = load_player_animations()
         deck = load_cards()
-        casino_background, casino_tables, bartender, drink, slot_machine_frames = load_casino_scenes()
+        casino_background, casino_tables, bartender, drink, slot_machine_frames, stool = load_casino_scenes()
     except FileNotFoundError as error:
         pygame.quit()
         raise SystemExit(error) from error
@@ -300,6 +344,8 @@ def main() -> None:
     slot_machine_timer = 0.0
     mode = "menu"
     show_tutorial = True
+    poker_confidence_percent = 50
+    poker_confidence_dragging = False
     hand = random.sample(deck, min(HAND_SIZE, len(deck)))
     running = True
 
@@ -331,7 +377,23 @@ def main() -> None:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     mode = "room"
                 continue
-            elif event.type == pygame.KEYDOWN:
+            if mode == "cards":
+                slider = pygame.Rect(300, 560, 680, 45)
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and slider.collidepoint(event.pos):
+                    poker_confidence_dragging = True
+                    poker_confidence_percent = round(
+                        max(0, min(680, event.pos[0] - 300)) * 100 / 680
+                    )
+                    continue
+                if event.type == pygame.MOUSEMOTION and poker_confidence_dragging:
+                    poker_confidence_percent = round(
+                        max(0, min(680, event.pos[0] - 300)) * 100 / 680
+                    )
+                    continue
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    poker_confidence_dragging = False
+                    continue
+            if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     mode = "room"
                 elif mode == "cards" and event.key == pygame.K_SPACE:
@@ -366,7 +428,7 @@ def main() -> None:
         if mode == "menu":
             menu.draw(now)
         elif mode == "cards":
-            draw_card_game(screen, hand, title_font, font)
+            draw_card_game(screen, hand, title_font, font, poker_confidence_percent)
         elif mode == "slots":
             draw_slot_machine_game(screen, slot_machine_frames[slot_machine_frame], title_font, font)
         elif mode == "blackjack" and blackjack_game is not None:
@@ -408,6 +470,7 @@ def main() -> None:
                 casino_background,
                 casino_tables,
                 bartender,
+                stool,
                 drink,
                 slot_machine_frames,
                 slot_machine_frame,

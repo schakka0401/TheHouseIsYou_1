@@ -28,6 +28,8 @@ class BlackjackGame:
         self.phase = "decision"
         self.action: str | None = None
         self.confidence_level: int | None = None
+        self.confidence_percent = 50
+        self.confidence_dragging = False
         self.wager_text = ""
         self.scenario: Scenario | None = None
         self.profile = None
@@ -69,6 +71,8 @@ class BlackjackGame:
         self.phase = "decision"
         self.action = None
         self.confidence_level = None
+        self.confidence_percent = 50
+        self.confidence_dragging = False
         self.wager_text = ""
 
     def update(self) -> None:
@@ -136,7 +140,25 @@ class BlackjackGame:
         self.tracker.add(record)
         self.phase = "result"
 
+    def _update_confidence_from_mouse(self, position: tuple[int, int]) -> None:
+        slider_left, slider_width = 300, 680
+        self.confidence_percent = round(
+            max(0, min(slider_width, position[0] - slider_left)) * 100 / slider_width
+        )
+
     def handle_event(self, event: pygame.event.Event) -> str | None:
+        if self.phase == "confidence":
+            slider = pygame.Rect(300, 490, 680, 45)
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and slider.collidepoint(event.pos):
+                self.confidence_dragging = True
+                self._update_confidence_from_mouse(event.pos)
+                return None
+            if event.type == pygame.MOUSEMOTION and self.confidence_dragging:
+                self._update_confidence_from_mouse(event.pos)
+                return None
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self.confidence_dragging = False
+                return None
         if event.type != pygame.KEYDOWN:
             return None
         if event.key == pygame.K_ESCAPE:
@@ -151,11 +173,8 @@ class BlackjackGame:
             elif event.key in (pygame.K_RETURN, pygame.K_SPACE) and self.action:
                 self.phase = "confidence"
         elif self.phase == "confidence":
-            if pygame.K_1 <= event.key <= pygame.K_9:
-                self.confidence_level = event.key - pygame.K_0
-            elif event.key == pygame.K_0:
-                self.confidence_level = 10
-            elif event.key in (pygame.K_RETURN, pygame.K_SPACE) and self.confidence_level:
+            if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                self.confidence_level = max(1, min(10, round(self.confidence_percent / 10)))
                 self.phase = "wager"
         elif self.phase == "wager":
             if pygame.K_0 <= event.key <= pygame.K_9 and len(self.wager_text) < 6:
@@ -216,8 +235,8 @@ class BlackjackGame:
             self._text("Choose an action: [H] HIT   [S] STAND, then press ENTER", (220, 420))
             self._text(f"Selected: {self.action.upper() if self.action else 'NONE'}", (480, 475), 34, "#f1d277")
         elif self.phase == "confidence":
-            self._text("Before seeing the answer, choose confidence 1–10, then press ENTER", (170, 420))
-            self._text(f"Confidence: {self.confidence_level or '_'} / 10", (480, 480), 35, "#f1d277")
+            self._text("Drag to choose your confidence, then press ENTER", (300, 420))
+            self._draw_confidence_slider()
         elif self.phase == "wager":
             self._text("Enter wager chips (1 to your bankroll), then press ENTER", (250, 420))
             self._text(f"Wager: {self.wager_text or '_'} chips", (480, 480), 35, "#f1d277")
@@ -227,6 +246,17 @@ class BlackjackGame:
             self._text("Decision recorded. Statistical analysis comes after the session.", (280, 465), 24)
             self._text("Press ENTER for the next scenario", (390, 550))
         self._text("ESC: return to room", (35, 680), 22, "#d8d0b8")
+
+    def _draw_confidence_slider(self) -> None:
+        left, top, width = 300, 500, 680
+        pygame.draw.rect(self.screen, "#3b2418", (left, top, width, 18), border_radius=9)
+        fill_width = round(width * self.confidence_percent / 100)
+        if fill_width:
+            pygame.draw.rect(self.screen, "#d29a32", (left, top, fill_width, 18), border_radius=9)
+        pygame.draw.rect(self.screen, "#f1d277", (left - 2, top - 2, width + 4, 22), 2, border_radius=11)
+        knob_x = left + fill_width
+        pygame.draw.circle(self.screen, "#f7e9b9", (knob_x, top + 9), 12)
+        self._text(f"Confidence: {self.confidence_percent}%", (520, 550), 35, "#f1d277")
 
     def _draw_results(self):
         profile = self.profile or self.tracker.profile()
