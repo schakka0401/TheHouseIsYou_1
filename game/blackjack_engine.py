@@ -14,13 +14,15 @@ Card = tuple[str, str]
 RANKS = ("2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A")
 SUITS = ("clubs", "diamonds", "hearts", "spades")
 SIMULATIONS_PER_ACTION = 50_000
-EASY_MARGIN = 0.20
-MEDIUM_MARGIN = 0.08
+SCENARIO_FILTER_SIMULATIONS = 200
+VERY_OBVIOUS_MARGIN = 0.30
+EASY_MARGIN = 0.18
+MEDIUM_MARGIN = 0.06
 
 
 @dataclass(frozen=True)
 class Scenario:
-    player_cards: tuple[Card, Card]
+    player_cards: tuple[Card, ...]
     dealer_upcard: Card
 
     @property
@@ -92,6 +94,8 @@ class BlackjackEngine:
 
     @staticmethod
     def difficulty(margin: float) -> str:
+        if margin >= VERY_OBVIOUS_MARGIN:
+            return "VERY_OBVIOUS"
         if margin >= EASY_MARGIN:
             return "EASY"
         if margin >= MEDIUM_MARGIN:
@@ -117,10 +121,11 @@ class BlackjackEngine:
             return "loss"
         return "push"
 
-    def _simulate_action(self, scenario: Scenario, action: str) -> SimulationStats:
+    def _simulate_action(self, scenario: Scenario, action: str, simulations: int | None = None) -> SimulationStats:
         counts = {"win": 0, "loss": 0, "push": 0}
         visible = list(scenario.player_cards) + [scenario.dealer_upcard]
-        for _ in range(self.simulations):
+        simulation_count = simulations or self.simulations
+        for _ in range(simulation_count):
             deck = [card for card in self.deck() if card not in visible]
             player_cards = list(scenario.player_cards)
             if action == "hit":
@@ -129,8 +134,15 @@ class BlackjackEngine:
                     player_cards.append(self._draw(deck))
             total, _ = hand_value(player_cards)
             counts[self._finish(total, scenario.dealer_upcard, deck, player_cards)] += 1
-        n = float(self.simulations)
+        n = float(simulation_count)
         return SimulationStats(counts["win"] / n, counts["loss"] / n, counts["push"] / n)
+
+    def approximate(self, scenario: Scenario) -> dict[str, SimulationStats]:
+        """Cheap scenario filter used before a round becomes visible."""
+        return {
+            "hit": self._simulate_action(scenario, "hit", SCENARIO_FILTER_SIMULATIONS),
+            "stand": self._simulate_action(scenario, "stand", SCENARIO_FILTER_SIMULATIONS),
+        }
 
     def evaluate(self, scenario: Scenario) -> dict[str, SimulationStats]:
         if scenario.key not in self.cache:
@@ -175,15 +187,27 @@ class BlackjackEngine:
             raise RuntimeError("Unable to generate a blackjack scenario")
         return fallback
 
-    def generate_raw_scenario(self, used: set[tuple] | None = None) -> Scenario:
-        """Generate a gameplay scenario without any EV/Monte Carlo work."""
+    def generate_raw_scenario(self, used: set[tuple] | None = None, target: str | None = None) -> Scenario:
+        """Generate a legal, varied scenario using only cheap filtering."""
         used = used or set()
         for _ in range(500):
             cards = self.deck()
-            scenario = Scenario((self._draw(cards), self._draw(cards)), self._draw(cards))
+            hand_size = self.random.choices((2, 3, 4, 5), weights=(45, 30, 20, 5))[0]
+            player_cards = tuple(self._draw(cards) for _ in range(hand_size))
+            scenario = Scenario(player_cards, self._draw(cards))
             if scenario.key in used:
                 continue
             total, _ = hand_value(list(scenario.player_cards))
             if total <= 21:
+                approximate = self.approximate(scenario)
+                difficulty = self.difficulty(abs(approximate["hit"].ev - approximate["stand"].ev))
+                if target is None or difficulty == target or (target == "EASY" and difficulty == "VERY_OBVIOUS"):
+                    return scenario
+        # Never leave the table stuck if a narrow target is unlucky.
+        for _ in range(500):
+            cards = self.deck()
+            hand_size = self.random.choice((2, 3, 4))
+            scenario = Scenario(tuple(self._draw(cards) for _ in range(hand_size)), self._draw(cards))
+            if scenario.key not in used and hand_value(list(scenario.player_cards))[0] <= 21:
                 return scenario
         raise RuntimeError("Unable to generate a unique blackjack scenario")

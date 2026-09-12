@@ -5,9 +5,10 @@ import random
 
 import pygame
 
-from game.menu import MainMenu
+from game.menu import AnimatedImageButton, MainMenu, MenuButton, PRESS_MS, SettingsMenu, serif_font
 from game.blackjack_game import BlackjackGame
 from game.player_state import PlayerState
+from game.audio import AudioManager, FOOTSTEP_INTERVAL_MS
 
 
 WINDOW_SIZE = (1280, 720)
@@ -20,9 +21,88 @@ HAND_SIZE = 5
 ASSETS = Path(__file__).resolve().parent.parent / "static" / "assets"
 CARD_DIRECTORY = ASSETS / "cards"
 PLAYER_SPRITE_DIRECTORY = ASSETS / "sprites"
+IMAGE_DIRECTORY = ASSETS / "images"
 CASINO_DIRECTORY = ASSETS / "2D Top Down Pixel Art Tileset Casino"
 CASINO_TILESET = CASINO_DIRECTORY / "2D_TopDown_Tileset_Casino_1024x512.png"
 TABLE = pygame.Rect(465, 250, 350, 220)
+DEBUG_MENU_HITBOXES = False
+
+def find_image_asset(stem: str) -> Path:
+    matches = sorted(IMAGE_DIRECTORY.glob(f"{stem}.*"))
+    if not matches:
+        raise FileNotFoundError(f"Missing image asset: {IMAGE_DIRECTORY / (stem + '.*')}")
+    return matches[0]
+
+
+def load_ui_assets() -> tuple[pygame.Surface, pygame.Surface, pygame.Surface]:
+    """Load the supplied UI artwork once during game initialization."""
+    home_button = pygame.image.load(find_image_asset("home_button")).convert_alpha()
+    # The current supplied file is options.png; accept options_menu.* too so
+    # the loader follows the asset's semantic name without assuming an extension.
+    options_matches = sorted(IMAGE_DIRECTORY.glob("options_menu.*")) or sorted(IMAGE_DIRECTORY.glob("options.*"))
+    if not options_matches:
+        raise FileNotFoundError(f"Missing image asset: {IMAGE_DIRECTORY / 'options_menu.*'}")
+    options_menu = pygame.image.load(options_matches[0]).convert_alpha()
+    settings_menu = pygame.image.load(find_image_asset("settings")).convert_alpha()
+    return home_button, options_menu, settings_menu
+
+
+def scaled_options_menu(image: pygame.Surface, screen_size: tuple[int, int]) -> pygame.Surface:
+    """Scale the complete menu artwork proportionally to fit the screen."""
+    screen_width, screen_height = screen_size
+    scale = min((screen_width * 0.72) / image.get_width(), (screen_height * 0.90) / image.get_height())
+    size = (max(1, round(image.get_width() * scale)), max(1, round(image.get_height() * scale)))
+    return pygame.transform.smoothscale(image, size)
+
+
+def visible_asset_rect(image: pygame.Surface) -> pygame.Rect:
+    """Return the main visible component, excluding transparent canvas padding."""
+    components = pygame.mask.from_surface(image, threshold=32).get_bounding_rects()
+    return max(components, key=lambda rect: rect.width * rect.height) if components else image.get_rect()
+
+
+def scale_asset_rect(source_rect: pygame.Rect, source_size: tuple[int, int], destination_rect: pygame.Rect) -> pygame.Rect:
+    """Map a source-image rectangle into the image's displayed screen rectangle."""
+    scale_x = destination_rect.width / source_size[0]
+    scale_y = destination_rect.height / source_size[1]
+    return pygame.Rect(
+        destination_rect.left + round(source_rect.left * scale_x),
+        destination_rect.top + round(source_rect.top * scale_y),
+        round(source_rect.width * scale_x),
+        round(source_rect.height * scale_y),
+    )
+
+
+def make_options_buttons(panel_rect: pygame.Rect, face: pygame.font.Font) -> list[MenuButton]:
+    """Create the in-game buttons relative to the visible decorative frame."""
+    pw = panel_rect.width
+    ph = panel_rect.height
+    cx = panel_rect.centerx
+    py = panel_rect.top
+    button_width = int(pw * 0.68)
+    button_height = int(ph * 0.105)
+    center_ys = (py + ph * 0.39, py + ph * 0.59, py + ph * 0.79)
+    labels = ("RESUME", "SETTINGS", "MAIN MENU")
+    buttons = []
+    for label, center_y in zip(labels, center_ys):
+        button_rect = pygame.Rect(0, 0, button_width, button_height)
+        button_rect.center = (cx, round(center_y))
+        buttons.append(MenuButton(label, 0, face, button_rect))
+    return buttons
+
+
+def select_options_button(buttons: list[MenuButton], index: int, menu_audio, play_sound: bool = True) -> int:
+    if not buttons:
+        return 0
+    index %= len(buttons)
+    old_index = next((i for i, button in enumerate(buttons) if button.selected), 0)
+    changed = index != old_index
+    for button_index, button in enumerate(buttons):
+        button.selected = button_index == index
+    if changed and play_sound:
+        # MenuAudio owns the already-loaded main-menu UI sound objects.
+        menu_audio.switch()
+    return index
 
 
 def load_player_animations() -> dict[str, list[pygame.Surface]]:
@@ -145,7 +225,8 @@ def main() -> None:
     screen = pygame.display.set_mode(WINDOW_SIZE, pygame.RESIZABLE)
     pygame.display.set_caption("The House Is You")
     clock = pygame.time.Clock()
-    menu = MainMenu(screen)
+    audio = AudioManager()
+    menu = MainMenu(screen, audio)
     player_state = PlayerState(chips=200)
     blackjack_game: BlackjackGame | None = None
     title_font = pygame.font.Font(None, 54)
@@ -155,22 +236,81 @@ def main() -> None:
         player_animations = load_player_animations()
         deck = load_cards()
         casino_backgrounds, casino_tables = load_casino_scenes()
+        home_button_image, options_menu_image, settings_menu_image = load_ui_assets()
     except FileNotFoundError as error:
         pygame.quit()
         raise SystemExit(error) from error
 
+    settings_screen = SettingsMenu(screen, settings_menu_image, audio, menu.audio)
+    options_panel_source_rect = visible_asset_rect(options_menu_image)
     player = pygame.Vector2(170, 520)
     facing = "right"
     animation_frame = 0
     animation_timer = 0.0
+    footstep_timer_ms = 0.0
+    next_step = 0
+    was_moving = False
     mode = "menu"
+    game_menu_open = False
+    home_button_rect = pygame.Rect(0, 0, 0, 0)
+    menu_rect = pygame.Rect(0, 0, 0, 0)
+    options_buttons: list[MenuButton] = []
+    options_layout_rect: pygame.Rect | None = None
+    options_selected_index = 0
+    options_face = serif_font(34, True)
+    home_image_button = AnimatedImageButton(home_button_image, pygame.Rect(0, 0, 0, 0), hover_scale=1.08)
+    was_home_hovered = False
+    last_options_mouse_pos = pygame.mouse.get_pos()
+    cached_screen_size: tuple[int, int] | None = None
+    cached_options_surface: pygame.Surface | None = None
+    pending_home_open_at: int | None = None
     room = 0
     hand = random.sample(deck, min(HAND_SIZE, len(deck)))
     running = True
 
+    def open_game_options() -> None:
+        nonlocal game_menu_open, options_selected_index, last_options_mouse_pos
+        audio.stop_footsteps()
+        game_menu_open = True
+        options_selected_index = 0
+        last_options_mouse_pos = pygame.mouse.get_pos()
+        for button_index, button in enumerate(options_buttons):
+            button.selected = button_index == options_selected_index
+
+    def close_game_menu() -> None:
+        nonlocal game_menu_open
+        game_menu_open = False
+
+    def activate_option(index: int, now: int) -> None:
+        nonlocal mode, was_moving
+        if not options_buttons:
+            return
+        options_buttons[index].press(now)
+        menu.audio.click()
+        if index == 0:
+            close_game_menu()
+        elif index == 1:
+            settings_screen.open("game_menu")
+            mode = "settings"
+        else:
+            close_game_menu()
+            audio.stop_footsteps()
+            was_moving = False
+            audio.stop_music()
+            menu.audio.start()
+            mode = "menu"
+
     while running:
         delta_time = clock.tick(60) / 1000
         now = pygame.time.get_ticks()
+        screen_width, screen_height = screen.get_size()
+        home_size = max(64, min(112, round(screen_height * 0.12)))
+        home_button_rect = pygame.Rect(0, 0, home_size, home_size)
+        home_button_rect.topright = (screen_width - 24, 24)
+        home_image_button.rect = home_button_rect
+        if pending_home_open_at is not None and now >= pending_home_open_at:
+            pending_home_open_at = None
+            open_game_options()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -180,10 +320,18 @@ def main() -> None:
                 if action == "quit":
                     running = False
                 elif action == "play":
+                    audio.stop_footsteps()
                     menu.audio.stop()
+                    audio.play_music("main_game_theme")
                     mode = "room"
-                # Options is intentionally retained as the existing no-op
-                # until an options screen is added to the project.
+                elif action == "options":
+                    settings_screen.open("main_menu")
+                    mode = "settings"
+                continue
+            if mode == "settings":
+                action = settings_screen.handle_event(event, now)
+                if action == "back":
+                    mode = "menu" if settings_screen.return_target == "main_menu" else "room"
                 continue
             if mode == "blackjack" and blackjack_game is not None:
                 action = blackjack_game.handle_event(event)
@@ -192,28 +340,83 @@ def main() -> None:
                 continue
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    mode = "room"
+                    if mode == "room":
+                        if game_menu_open:
+                            close_game_menu()
+                        else:
+                            was_moving = False
+                            open_game_options()
+                    elif mode == "cards":
+                        mode = "room"
+                    else:
+                        mode = "room"
+                elif mode == "room" and game_menu_open and event.key in (pygame.K_w, pygame.K_UP, pygame.K_s, pygame.K_DOWN):
+                    direction = -1 if event.key in (pygame.K_w, pygame.K_UP) else 1
+                    options_selected_index = select_options_button(
+                        options_buttons, options_selected_index + direction, menu.audio
+                    )
+                elif mode == "room" and game_menu_open and event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    activate_option(options_selected_index, now)
                 elif mode == "cards" and event.key == pygame.K_SPACE:
                     hand = random.sample(deck, min(HAND_SIZE, len(deck)))
                 elif mode == "room" and event.key == pygame.K_e and player.distance_to(pygame.Vector2(TABLE.center)) < 190:
+                    if game_menu_open:
+                        continue
                     if room == 0:
+                        audio.stop_footsteps()
                         mode = "cards"
                     else:
+                        audio.stop_footsteps()
                         blackjack_game = BlackjackGame(screen, player_state)
                         mode = "blackjack"
-
+            elif mode == "room" and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if game_menu_open:
+                    clicked_index = next(
+                        (index for index, button in enumerate(options_buttons) if button.contains(event.pos)),
+                        None,
+                    )
+                    if clicked_index is not None:
+                        options_selected_index = select_options_button(
+                            options_buttons, clicked_index, menu.audio, False
+                        )
+                        activate_option(clicked_index, now)
+                elif home_button_rect.collidepoint(event.pos):
+                    home_image_button.press(now)
+                    menu.audio.click()
+                    audio.stop_footsteps()
+                    was_moving = False
+                    pending_home_open_at = now + PRESS_MS
+                    was_home_hovered = False
+            elif mode == "room" and game_menu_open and event.type == pygame.MOUSEMOTION:
+                if event.pos != last_options_mouse_pos:
+                    last_options_mouse_pos = event.pos
+                    hovered_index = next(
+                        (index for index, button in enumerate(options_buttons) if button.contains(event.pos)),
+                        None,
+                    )
+                    if hovered_index is not None:
+                        options_selected_index = select_options_button(options_buttons, hovered_index, menu.audio)
+                    # Keep the current selection when the pointer leaves the
+                    # panel, matching the main menu's persistent selection.
         if mode == "menu":
             menu.draw(now)
+        elif mode == "settings":
+            settings_screen.draw(now)
         elif mode == "cards":
             draw_card_game(screen, hand, title_font, font)
         elif mode == "blackjack" and blackjack_game is not None:
             blackjack_game.update()
             blackjack_game.draw()
         else:
-            keys = pygame.key.get_pressed()
-            movement = pygame.Vector2(keys[pygame.K_d] - keys[pygame.K_a], keys[pygame.K_s] - keys[pygame.K_w])
-            walking = movement.length_squared() > 0
-            if walking:
+            # The room remains visible beneath the pause panel, but no gameplay
+            # input, interaction, animation, or footsteps run while paused.
+            keys = pygame.key.get_pressed() if not game_menu_open and pending_home_open_at is None else None
+            movement = pygame.Vector2(0, 0) if keys is None else pygame.Vector2(
+                keys[pygame.K_d] - keys[pygame.K_a], keys[pygame.K_s] - keys[pygame.K_w]
+            )
+            walking_input = movement.length_squared() > 0
+            old_position = player.copy()
+            if walking_input:
                 movement = movement.normalize()
                 player += movement * PLAYER_SPEED * delta_time
                 if room == 0 and player.x >= WINDOW_SIZE[0] - PLAYER_SIZE[0] // 2:
@@ -246,8 +449,72 @@ def main() -> None:
                 animation_frame = 0
                 animation_timer = 0.0
 
+            actual_movement = player.distance_to(old_position) > 0.01
+            if actual_movement:
+                if not was_moving:
+                    # Make the first step audible immediately, then return to
+                    # the normal timed rhythm.
+                    audio.play_step(next_step)
+                    next_step = 1 - next_step
+                    footstep_timer_ms = 0.0
+                else:
+                    footstep_timer_ms += delta_time * 1000
+                while footstep_timer_ms >= FOOTSTEP_INTERVAL_MS:
+                    footstep_timer_ms -= FOOTSTEP_INTERVAL_MS
+                    audio.play_step(next_step)
+                    next_step = 1 - next_step
+                was_moving = True
+            else:
+                footstep_timer_ms = 0.0
+                audio.stop_footsteps()
+                was_moving = False
+
             frame = player_animations[facing][animation_frame]
             draw_room(screen, player, frame, font, room, casino_backgrounds, casino_tables)
+
+            screen_width, screen_height = screen.get_size()
+            if cached_screen_size != (screen_width, screen_height):
+                cached_screen_size = (screen_width, screen_height)
+                home_size = max(64, min(112, round(screen_height * 0.12)))
+                cached_options_surface = scaled_options_menu(options_menu_image, cached_screen_size)
+            home_button_rect = pygame.Rect(0, 0, home_size, home_size)
+            home_button_rect.topright = (screen_width - 24, 24)
+            home_image_button.rect = home_button_rect
+
+            if game_menu_open:
+                audio.stop_footsteps()
+                menu_surface = cached_options_surface
+                menu_rect = menu_surface.get_rect(center=screen.get_rect().center)
+                panel_rect = scale_asset_rect(
+                    options_panel_source_rect,
+                    options_menu_image.get_size(),
+                    menu_rect,
+                )
+                if options_layout_rect != panel_rect:
+                    options_buttons = make_options_buttons(panel_rect, options_face)
+                    options_layout_rect = panel_rect.copy()
+                    options_selected_index = select_options_button(
+                        options_buttons, options_selected_index, menu.audio, False
+                    )
+                overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+                overlay.fill((0, 0, 0, 135))
+                screen.blit(overlay, (0, 0))
+                screen.blit(menu_surface, menu_rect)
+                for button in options_buttons:
+                    button.draw(screen, now)
+                if DEBUG_MENU_HITBOXES:
+                    pygame.draw.rect(screen, (255, 255, 255), panel_rect, 1)
+                    for button in options_buttons:
+                        pygame.draw.rect(screen, (0, 255, 0), button.rect, 1)
+            else:
+                options_buttons = []
+                options_layout_rect = None
+                home_hovered = home_button_rect.collidepoint(pygame.mouse.get_pos())
+                if home_hovered and not was_home_hovered:
+                    menu.audio.switch()
+                was_home_hovered = home_hovered
+                home_image_button.update(now, home_hovered)
+                home_image_button.draw(screen, now)
 
         pygame.display.flip()
 
