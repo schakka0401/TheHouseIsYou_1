@@ -16,6 +16,7 @@ CARD_DIRECTORY = ASSETS / "cards"
 DUDE_DIRECTORY = ASSETS / "free-pixel-art-tiny-hero-sprites" / "3 Dude_Monster"
 CASINO_DIRECTORY = ASSETS / "2D Top Down Pixel Art Tileset Casino"
 CASINO_TILESET = CASINO_DIRECTORY / "2D_TopDown_Tileset_Casino_1024x512.png"
+SLOT_MACHINE_SHEET = CASINO_DIRECTORY / "Animated Sprite Sheets" / "SlotMachinesAnimationSheet_0.png"
 TABLE = pygame.Rect(465, 250, 350, 220)
 
 
@@ -42,45 +43,51 @@ def load_cards() -> list[tuple[str, pygame.Surface]]:
     return cards
 
 
-def make_casino_room(tileset: pygame.Surface, room: int) -> pygame.Surface:
+def make_casino_room(tileset: pygame.Surface, slot_machine: pygame.Surface, room: int) -> pygame.Surface:
     """Build a full-sized casino room from the supplied pixel-art tileset."""
     background = pygame.Surface(WINDOW_SIZE)
-    background.fill("#64162c")
 
-    red_carpet = pygame.transform.scale(tileset.subsurface((0, 0, 32, 32)), (48, 48))
-    blue_carpet = pygame.transform.scale(tileset.subsurface((0, 128, 32, 32)), (48, 48))
+    def checkerboard(area: pygame.Rect, colors: tuple[str, str]) -> None:
+        cell = 48
+        for row, y in enumerate(range(area.top, area.bottom, cell)):
+            for column, x in enumerate(range(area.left, area.right, cell)):
+                pygame.draw.rect(background, colors[(row + column) % 2], (x, y, cell, cell))
 
-    def tile(surface: pygame.Surface, image: pygame.Surface, area: pygame.Rect) -> None:
-        for y in range(area.top, area.bottom, image.get_height()):
-            for x in range(area.left, area.right, image.get_width()):
-                surface.blit(image, (x, y))
+    def plant(x: int, y: int) -> None:
+        """A small, tidy floor plant used to separate machine rows."""
+        pygame.draw.ellipse(background, "#a96830", (x + 10, y + 42, 34, 18))
+        pygame.draw.rect(background, "#d49a4a", (x + 14, y + 44, 26, 13))
+        for leaf in ((x + 6, y + 17), (x + 22, y + 4), (x + 38, y + 17), (x + 12, y + 26), (x + 32, y + 26)):
+            pygame.draw.ellipse(background, "#4d9b53", (*leaf, 16, 34))
+        pygame.draw.line(background, "#2f6e3a", (x + 27, y + 45), (x + 28, y + 15), 4)
 
-    # A solid color beneath the transparent tile art prevents sheet-padding from
-    # showing up as distracting black seams.
-    tile(background, red_carpet, pygame.Rect(0, 48, WINDOW_SIZE[0], WINDOW_SIZE[1] - 48))
+    # Structured red outer carpet and blue gaming floor inspired by the reference.
+    checkerboard(pygame.Rect(0, 0, WINDOW_SIZE[0], WINDOW_SIZE[1]), ("#701832", "#831d38"))
     floor = pygame.Rect(96, 112, WINDOW_SIZE[0] - 192, WINDOW_SIZE[1] - 176)
-    background.fill("#192c78", floor)
-    tile(background, blue_carpet, floor)
+    checkerboard(floor, ("#183578", "#23458f"))
+    pygame.draw.rect(background, "#b38b52", floor, width=8)
 
-    # Use two unscaled, deliberate strips from the pack instead of a collage of furniture.
-    slot_bank = pygame.transform.scale(tileset.subsurface((640, 0, 155, 70)), (310, 140))
-    slot_bank.set_colorkey("#000000")
-    background.blit(slot_bank, slot_bank.get_rect(midtop=(WINDOW_SIZE[0] // 2, 105)))
-    side_slots = pygame.transform.scale(tileset.subsurface((795, 0, 120, 70)), (240, 140))
-    side_slots.set_colorkey("#000000")
-    background.blit(side_slots, (115, 505))
-    background.blit(side_slots, (WINDOW_SIZE[0] - 355, 505))
+    # Complete front-facing machines from the pack's dedicated slot sprite sheet.
+    # Their symmetric rows leave clear paths to the center table.
+    for position in ((180, 185), (310, 185), (858, 185), (988, 185), (180, 455), (310, 455), (858, 455), (988, 455)):
+        background.blit(slot_machine, position)
+    plant(440, 500)
+    plant(785, 500)
     return background
 
 
 def load_casino_scenes() -> tuple[list[pygame.Surface], list[pygame.Surface]]:
     """Load casino-room backgrounds plus the pack's roulette and blackjack tables."""
     tileset = pygame.image.load(CASINO_TILESET).convert_alpha()
-    rooms = [make_casino_room(tileset, 0), make_casino_room(tileset, 1)]
-    roulette_table = tileset.subsurface((870, 263, 154, 105))
-    blackjack_table = tileset.subsurface((880, 194, 144, 65))
+    slot_sheet = pygame.image.load(SLOT_MACHINE_SHEET).convert_alpha()
+    # Each 32px frame is a complete machine. The first frame is the straight-on "WIN" cabinet.
+    slot_machine = pygame.transform.scale(slot_sheet.subsurface((0, 0, 32, 32)), (112, 112))
+    rooms = [make_casino_room(tileset, slot_machine, 0), make_casino_room(tileset, slot_machine, 1)]
+    # The table begins at x=913; the earlier wider crop also picked up two
+    # neighboring sheet fragments on its left side.
+    blackjack_table = tileset.subsurface((913, 194, 111, 65))
     tables = [
-        pygame.transform.scale(roulette_table, (350, 238)),
+        pygame.transform.scale(blackjack_table, (430, 194)),
         pygame.transform.scale(blackjack_table, (390, 176)),
     ]
     return rooms, tables
@@ -174,7 +181,8 @@ def draw_blackjack(
 
 def main() -> None:
     pygame.init()
-    screen = pygame.display.set_mode(WINDOW_SIZE)
+    window = pygame.display.set_mode(WINDOW_SIZE, pygame.RESIZABLE)
+    screen = pygame.Surface(WINDOW_SIZE).convert()
     pygame.display.set_caption("The House Is You")
     clock = pygame.time.Clock()
     title_font = pygame.font.Font(None, 54)
@@ -198,6 +206,7 @@ def main() -> None:
     blackjack_player: list[tuple[str, pygame.Surface]] = []
     blackjack_dealer: list[tuple[str, pygame.Surface]] = []
     blackjack_status = "Press N to deal"
+    fullscreen = False
     running = True
 
     def new_blackjack_round() -> None:
@@ -214,7 +223,12 @@ def main() -> None:
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
+                if event.key == pygame.K_F11:
+                    fullscreen = not fullscreen
+                    flags = pygame.FULLSCREEN if fullscreen else pygame.RESIZABLE
+                    size = (0, 0) if fullscreen else WINDOW_SIZE
+                    window = pygame.display.set_mode(size, flags)
+                elif event.key == pygame.K_ESCAPE:
                     mode = "room"
                 elif mode == "cards" and event.key == pygame.K_SPACE:
                     hand = random.sample(deck, min(HAND_SIZE, len(deck)))
@@ -273,6 +287,15 @@ def main() -> None:
                 frame = pygame.transform.flip(frame, True, False)
             draw_room(screen, player, frame, font, room, casino_backgrounds, casino_tables)
 
+        window_size = window.get_size()
+        scale = min(window_size[0] / WINDOW_SIZE[0], window_size[1] / WINDOW_SIZE[1])
+        render_size = (round(WINDOW_SIZE[0] * scale), round(WINDOW_SIZE[1] * scale))
+        position = ((window_size[0] - render_size[0]) // 2, (window_size[1] - render_size[1]) // 2)
+        window.fill("#000000")
+        if render_size == WINDOW_SIZE:
+            window.blit(screen, (0, 0))
+        else:
+            window.blit(pygame.transform.scale(screen, render_size), position)
         pygame.display.flip()
 
     pygame.quit()
