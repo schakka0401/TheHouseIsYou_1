@@ -1,7 +1,6 @@
 """Integrated blackjack table: friend's hand flow with the decision experiment layered on top."""
 from __future__ import annotations
 
-from collections import Counter
 from pathlib import Path
 import random
 import threading
@@ -133,7 +132,7 @@ class BlackjackGame:
     def _remove_selected_chip(self, position: tuple[int, int]) -> bool:
         for rect, value in self.selected_chip_rects:
             if rect.collidepoint(position):
-                self.selected_chips.remove(value)
+                self.selected_chips.pop()
                 self.wager_text = str(sum(self.selected_chips)) if self.selected_chips else ""
                 return True
         return False
@@ -157,6 +156,9 @@ class BlackjackGame:
 
         self.analysis_thread = threading.Thread(target=analyze_session, daemon=True)
         self.analysis_thread.start()
+
+    def _restart_session(self) -> None:
+        self.__init__(self.screen, self.player_state)
 
     def _analysis_progress(self, completed: int, total: int) -> None:
         self.analysis_completed = completed
@@ -298,14 +300,15 @@ class BlackjackGame:
                     self._take_action("stand")
             return None
 
-        if self.phase == "result" and event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_SPACE):
+        replay_keys = (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE)
+        if self.phase == "result" and event.type == pygame.KEYDOWN and event.key in replay_keys:
             if self.round_number >= BLACKJACK_SESSION_ROUNDS or self.player_state.chips <= 0:
                 self._finish_session()
             else:
                 self._queue_round()
-        elif self.phase == "results" and event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_SPACE):
+        elif self.phase == "results" and event.type == pygame.KEYDOWN and event.key in replay_keys:
             if self.player_state.chips > 0:
-                self.__init__(self.screen, self.player_state)
+                self._restart_session()
             else:
                 return "room"
         return None
@@ -370,7 +373,7 @@ class BlackjackGame:
             self._text(f"Wager: {self.wager_text or '_'} chips", (500, 570), 34, "#f1d277")
             if self.selected_chips:
                 self._text("Click a placed chip to remove it", (350, 595), 19, "#d8d0b8")
-            self._draw_selected_chips(start_x=820, start_y=455)
+            self._draw_selected_chips(start_x=900, start_y=500)
             self._draw_wager_chips()
         elif self.phase == "decision":
             self._text(f"Confidence locked: {self.confidence_level}/10   Wager locked: {self.current_bet} chips", (270, 515), 23, "#f1d277")
@@ -398,20 +401,29 @@ class BlackjackGame:
     def _draw_selected_chips(self, start_x: int = 760, start_y: int = 505) -> None:
         self.selected_chip_rects = []
         chip_size = BET_CHIP_SIZE
-        counts = Counter(self.selected_chips)
-        for index, value in enumerate(CHIP_VALUES):
-            if not counts[value]:
-                continue
+        if not self.selected_chips:
+            return
+
+        visible_layers = min(len(self.selected_chips), 20)
+        base_rect = pygame.Rect(start_x, start_y, *chip_size)
+        top_rect = base_rect.move(0, -(visible_layers - 1) * 3)
+        click_rect = pygame.Rect(
+            base_rect.x,
+            top_rect.y,
+            base_rect.width,
+            base_rect.height + (visible_layers - 1) * 3,
+        )
+        self.selected_chip_rects.append((click_rect, self.selected_chips[-1]))
+        for index, value in enumerate(self.selected_chips[-visible_layers:]):
             color = CHIP_COLORS[CHIP_VALUES.index(value)]
-            rect = pygame.Rect(start_x + index * 75, start_y, *chip_size)
-            self.selected_chip_rects.append((rect, value))
-            chip = pygame.transform.smoothscale(self.chip_images[("flat", color)], chip_size)
-            self.screen.blit(chip, rect)
-            if counts[value] > 1:
-                self._text(f"x{counts[value]}", (rect.x - 2, rect.bottom + 2), 19, "#f1d277")
+            chip = pygame.transform.smoothscale(self.chip_images[("stacked", color)], chip_size)
+            layer_rect = base_rect.move(0, -(index * 3))
+            self.screen.blit(chip, layer_rect)
+        if len(self.selected_chips) > 1:
+            self._text(f"x{len(self.selected_chips)}", (base_rect.x - 2, base_rect.bottom + 8), 19, "#f1d277")
 
     def _draw_selected_chip(self) -> None:
-        self._draw_selected_chips(start_x=820, start_y=455)
+        self._draw_selected_chips(start_x=900, start_y=500)
 
     def _draw_results(self):
         profile = self.profile or self.tracker.profile()

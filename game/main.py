@@ -130,9 +130,9 @@ TABLE_INTERACTION_DISTANCE = 190
 SLOT_MACHINE_INTERACTION_DISTANCE = 120
 BEVERAGE_POSITIONS = ((600, 245), (640, 245), (680, 245))
 STOOL_POSITIONS = (
-    (180, 555),
-    (300, 575),
-    (420, 555),
+    (200, 520),
+    (320, 560),
+    (440, 520),
     (560, 345),
     (640, 365),
     (720, 345),
@@ -330,8 +330,6 @@ def draw_room(
     cup: pygame.Surface,
 ) -> None:
     screen.blit(background, (0, 0))
-    if show_tutorial:
-        draw_tutorial_path(screen, player, BLACKJACK_TABLE_CENTER)
     slot_machine = slot_machine_frames[slot_machine_frame]
     for center in SLOT_MACHINE_CENTERS:
         screen.blit(slot_machine, slot_machine.get_rect(center=center))
