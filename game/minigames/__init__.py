@@ -102,8 +102,8 @@ def main():
     font_card = pygame.font.SysFont("Arial", 22, bold=True)
 
     # Buttons
-    btn_hit = Button((280, 560, 150, 50), "Hit", BLUE, (70, 140, 230))
-    btn_stand = Button((470, 560, 150, 50), "Stand", RED, (230, 70, 70))
+    btn_hit = Button((280, 560, 150, 50), "♠    Hit    ♥", BLUE, (70, 140, 230))
+    btn_stand = Button((470, 560, 150, 50), "♦  Stand  ♣", RED, (230, 70, 70))
     btn_new_game = Button((375, 560, 150, 50), "Deal Again", GOLD, (255, 210, 80), BLACK)
 
     def start_round():
