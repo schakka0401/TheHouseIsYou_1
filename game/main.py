@@ -5,29 +5,37 @@ import random
 
 import pygame
 
+from game.menu import MainMenu
+
 
 WINDOW_SIZE = (1280, 720)
 CARD_SIZE = (150, 210)
 PLAYER_SIZE = (96, 96)
+PLAYER_DISPLAY_SIZE = (72, 96)
 PLAYER_SPEED = 300
+PLAYER_ANIMATION_FRAME_DURATION = 0.12
 HAND_SIZE = 5
 ASSETS = Path(__file__).resolve().parent.parent / "static" / "assets"
 CARD_DIRECTORY = ASSETS / "cards"
-DUDE_DIRECTORY = ASSETS / "free-pixel-art-tiny-hero-sprites" / "3 Dude_Monster"
+PLAYER_SPRITE_DIRECTORY = ASSETS / "sprites"
 CASINO_DIRECTORY = ASSETS / "2D Top Down Pixel Art Tileset Casino"
 CASINO_TILESET = CASINO_DIRECTORY / "2D_TopDown_Tileset_Casino_1024x512.png"
 TABLE = pygame.Rect(465, 250, 350, 220)
 
 
-def load_animation(filename: str, frames: int) -> list[pygame.Surface]:
-    """Split a horizontal sprite sheet into individual scaled frames."""
-    sheet = pygame.image.load(DUDE_DIRECTORY / filename).convert_alpha()
-    frame_width = sheet.get_width() // frames
-    images = []
-    for index in range(frames):
-        frame = sheet.subsurface((index * frame_width, 0, frame_width, sheet.get_height()))
-        images.append(pygame.transform.scale(frame, PLAYER_SIZE))
-    return images
+def load_player_animations() -> dict[str, list[pygame.Surface]]:
+    """Load the two right-facing frames and cache their left-facing flips."""
+    right_frames: list[pygame.Surface] = []
+    for frame_index in range(2):
+        path = PLAYER_SPRITE_DIRECTORY / f"player_right{frame_index}.png"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing player sprite: {path}")
+        image = pygame.image.load(path).convert_alpha()
+        # Keep the existing on-screen size regardless of source PNG dimensions.
+        right_frames.append(pygame.transform.scale(image, PLAYER_DISPLAY_SIZE))
+
+    left_frames = [pygame.transform.flip(frame, True, False) for frame in right_frames]
+    return {"right": right_frames, "left": left_frames}
 
 
 def load_cards() -> list[tuple[str, pygame.Surface]]:
@@ -174,15 +182,15 @@ def draw_blackjack(
 
 def main() -> None:
     pygame.init()
-    screen = pygame.display.set_mode(WINDOW_SIZE)
+    screen = pygame.display.set_mode(WINDOW_SIZE, pygame.RESIZABLE)
     pygame.display.set_caption("The House Is You")
     clock = pygame.time.Clock()
+    menu = MainMenu(screen)
     title_font = pygame.font.Font(None, 54)
     font = pygame.font.Font(None, 30)
 
     try:
-        idle_frames = load_animation("Dude_Monster_Idle_4.png", 4)
-        walk_frames = load_animation("Dude_Monster_Walk_6.png", 6)
+        player_animations = load_player_animations()
         deck = load_cards()
         casino_backgrounds, casino_tables = load_casino_scenes()
     except FileNotFoundError as error:
@@ -190,9 +198,10 @@ def main() -> None:
         raise SystemExit(error) from error
 
     player = pygame.Vector2(170, 520)
-    facing_left = False
-    animation_time = 0.0
-    mode = "room"
+    facing = "right"
+    animation_frame = 0
+    animation_timer = 0.0
+    mode = "menu"
     room = 0
     hand = random.sample(deck, min(HAND_SIZE, len(deck)))
     blackjack_player: list[tuple[str, pygame.Surface]] = []
@@ -210,9 +219,21 @@ def main() -> None:
 
     while running:
         delta_time = clock.tick(60) / 1000
+        now = pygame.time.get_ticks()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+                continue
+            if mode == "menu":
+                action = menu.handle_event(event, now)
+                if action == "quit":
+                    running = False
+                elif action == "play":
+                    menu.audio.stop()
+                    mode = "room"
+                # Options is intentionally retained as the existing no-op
+                # until an options screen is added to the project.
+                continue
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     mode = "room"
@@ -243,17 +264,19 @@ def main() -> None:
                         mode = "blackjack"
                         new_blackjack_round()
 
-        if mode == "cards":
+        if mode == "menu":
+            menu.draw(now)
+        elif mode == "cards":
             draw_card_game(screen, hand, title_font, font)
         elif mode == "blackjack":
             draw_blackjack(screen, blackjack_player, blackjack_dealer, blackjack_status, title_font, font)
         else:
             keys = pygame.key.get_pressed()
-            direction = pygame.Vector2(keys[pygame.K_d] - keys[pygame.K_a], keys[pygame.K_s] - keys[pygame.K_w])
-            walking = direction.length_squared() > 0
+            movement = pygame.Vector2(keys[pygame.K_d] - keys[pygame.K_a], keys[pygame.K_s] - keys[pygame.K_w])
+            walking = movement.length_squared() > 0
             if walking:
-                direction = direction.normalize()
-                player += direction * PLAYER_SPEED * delta_time
+                movement = movement.normalize()
+                player += movement * PLAYER_SPEED * delta_time
                 if room == 0 and player.x >= WINDOW_SIZE[0] - PLAYER_SIZE[0] // 2:
                     room = 1
                     player.x = PLAYER_SIZE[0] // 2
@@ -263,14 +286,28 @@ def main() -> None:
                 else:
                     player.x = max(PLAYER_SIZE[0] // 2, min(WINDOW_SIZE[0] - PLAYER_SIZE[0] // 2, player.x))
                 player.y = max(130, min(WINDOW_SIZE[1] - PLAYER_SIZE[1] // 2, player.y))
-                if direction.x:
-                    facing_left = direction.x < 0
-                animation_time += delta_time
+                # Only horizontal movement changes facing. Vertical movement
+                # keeps the last left/right orientation, including diagonals.
+                if movement.x > 0:
+                    next_facing = "right"
+                elif movement.x < 0:
+                    next_facing = "left"
+                else:
+                    next_facing = facing
+                if next_facing != facing:
+                    facing = next_facing
+                    animation_frame = 0
+                    animation_timer = 0.0
+                animation_timer += delta_time
+                while animation_timer >= PLAYER_ANIMATION_FRAME_DURATION:
+                    animation_timer -= PLAYER_ANIMATION_FRAME_DURATION
+                    animation_frame = (animation_frame + 1) % 2
+            else:
+                # Keep the last horizontal facing direction while idle.
+                animation_frame = 0
+                animation_timer = 0.0
 
-            frames = walk_frames if walking else idle_frames
-            frame = frames[int(animation_time * 10) % len(frames)]
-            if facing_left:
-                frame = pygame.transform.flip(frame, True, False)
+            frame = player_animations[facing][animation_frame]
             draw_room(screen, player, frame, font, room, casino_backgrounds, casino_tables)
 
         pygame.display.flip()
