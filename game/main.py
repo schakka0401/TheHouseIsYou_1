@@ -1,7 +1,6 @@
 """The House Is You: explore rooms, deal cards, and play blackjack."""
 
 from pathlib import Path
-import random
 
 import pygame
 
@@ -422,7 +421,6 @@ def main() -> None:
 
     try:
         player_animations = load_player_animations()
-        deck = load_cards()
         casino_background, casino_tables, bartender, drink, slot_machine_frames, stool, beer, cup = load_casino_scenes()
         home_button_image, options_menu_image, settings_menu_image = load_ui_assets()
     except FileNotFoundError as error:
@@ -459,7 +457,6 @@ def main() -> None:
     slot_machine_frame = 0
     slot_machine_timer = 0.0
     show_tutorial = True
-    hand = random.sample(deck, min(HAND_SIZE, len(deck)))
     running = True
 
     def open_game_options() -> None:
@@ -553,7 +550,7 @@ def main() -> None:
                         else:
                             was_moving = False
                             open_game_options()
-                    elif mode == "cards":
+                    elif mode == "poker":
                         mode = "room"
                     else:
                         mode = "room"
@@ -564,8 +561,6 @@ def main() -> None:
                     )
                 elif mode == "room" and game_menu_open and event.key in (pygame.K_RETURN, pygame.K_SPACE):
                     activate_option(options_selected_index, now)
-                elif mode == "cards" and event.key == pygame.K_SPACE:
-                    hand = random.sample(deck, min(HAND_SIZE, len(deck)))
                 elif mode == "room" and event.key == pygame.K_e:
                     interactions = (
                         (player.distance_to(CARD_TABLE_CENTER), TABLE_INTERACTION_DISTANCE, "poker"),
@@ -583,7 +578,7 @@ def main() -> None:
                     nearest = min(available_interactions, key=lambda item: item[0])
                     if nearest[2] == "poker":
                         audio.stop_footsteps()
-                        poker_game = PokerGame(screen, player_state)
+                        poker_game = PokerGame(screen, player_state, menu_audio=menu.audio)
                         mode = "poker"
                     elif nearest[2] == "blackjack":
                         audio.stop_footsteps()
@@ -626,8 +621,9 @@ def main() -> None:
             menu.draw(now)
         elif mode == "settings":
             settings_screen.draw(now)
-        elif mode == "cards":
-            draw_card_game(screen, hand, title_font, font)
+        elif mode == "poker" and poker_game is not None:
+            poker_game.update()
+            poker_game.draw()
         elif mode == "slots":
             draw_slot_machine_game(screen, slot_machine_frames[slot_machine_frame], title_font, font)
         elif mode == "blackjack" and blackjack_game is not None:
