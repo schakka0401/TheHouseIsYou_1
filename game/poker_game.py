@@ -11,10 +11,18 @@ from game.player_state import PlayerState
 from game.poker_models import Card, PokerDecisionRecord, PokerScenario, PreparedPokerRound, card_code
 from game.poker_scenarios import EQUITY_SIMULATIONS, POKER_ROUNDS, PokerScenarioGenerator
 from game.poker_tracker import PokerSessionTracker
+from game.menu import serif_font
 
 
-CONFIDENCE_TRACK = pygame.Rect(55, 525, 270, 14)
+CONFIDENCE_TRACK = pygame.Rect(80, 560, 400, 14)
 CARD_SIZE = (82, 115)
+CHIP_VALUES = (1, 5, 10, 25, 50, 100)
+CHIP_COLORS = ("white", "red", "blue", "green", "black", "purple")
+CHIP_SOURCE_SIZE = (54, 54)
+CHIP_DISPLAY_SIZE = (36, 36)
+CHIP_TRAY_ORIGIN = (565, 575)
+CHIP_TRAY_STEP = (70, 52)
+WAGER_FIELD = pygame.Rect(800, 585, 170, 42)
 
 
 @dataclass(frozen=True)
@@ -37,7 +45,7 @@ class PokerTableRow:
         if self.state != self.last_action:
             pieces.append(self.state)
         if self.amount_still_to_call:
-            pieces.append(f"{self.amount_still_to_call} MORE TO CALL")
+            pieces.append(f"${self.amount_still_to_call} MORE TO CALL")
         return " | ".join(piece for piece in pieces if piece)
 
 
@@ -123,13 +131,18 @@ class PokerGame:
         self.loading_error: Exception | None = None
         self.action_buttons: list[tuple[pygame.Rect, str]] = []
         self.size_buttons: list[tuple[pygame.Rect, int]] = []
-        self.lock_button_rect = pygame.Rect(990, 575, 230, 52)
+        self.lock_button_rect = pygame.Rect(990, 610, 230, 52)
         self.hover_token: tuple[str, int | str] | None = None
         self.card_images: dict[Card, pygame.Surface] = {}
-        self.title_font = pygame.font.Font(None, 44)
-        self.font = pygame.font.Font(None, 26)
-        self.small_font = pygame.font.Font(None, 20)
+        self.chip_images: dict[int, pygame.Surface] = {}
+        self.chip_rects: list[tuple[pygame.Rect, int]] = []
+        self.selected_chip_rects: list[tuple[pygame.Rect, int]] = []
+        self.selected_chips: list[int] = []
+        self.title_font = serif_font(44, True)
+        self.font = serif_font(26)
+        self.small_font = serif_font(20)
         self._load_card_images()
+        self._load_chip_images()
         self.on_poker_session_start()
         self._start_round_loading()
 
@@ -148,6 +161,13 @@ class PokerGame:
             card = (rank, parts[1])
             image = pygame.image.load(path).convert_alpha()
             self.card_images[card] = pygame.transform.smoothscale(image, CARD_SIZE)
+
+    def _load_chip_images(self) -> None:
+        chip_root = self.asset_root.parent / "Card_Game_GFX" / "Chips"
+        for value, color in zip(CHIP_VALUES, CHIP_COLORS):
+            path = chip_root / f"chips_stacked_{color}.png"
+            image = pygame.image.load(path).convert_alpha()
+            self.chip_images[value] = pygame.transform.smoothscale(image, CHIP_SOURCE_SIZE)
 
     def _start_round_loading(self) -> None:
         if self.round_number >= POKER_ROUNDS:
@@ -185,6 +205,9 @@ class PokerGame:
         self.confidence_percent = None
         self.selected_action = None
         self.selected_amount = None
+        self.selected_chips.clear()
+        self.chip_rects = []
+        self.selected_chip_rects = []
         self.record = None
         self.phase = "decision"
         self._layout_controls()
@@ -229,6 +252,13 @@ class PokerGame:
                         self.menu_audio.click()
                     self._select_action(action)
                     return None
+            if self.selected_action in {"bet", "raise"}:
+                for rect, value in self.chip_rects:
+                    if rect.collidepoint(event.pos):
+                        self._add_chip(value)
+                        return None
+                if self._remove_selected_chip(event.pos):
+                    return None
             for rect, amount in self.size_buttons:
                 if rect.collidepoint(event.pos) and self.selected_action in {"bet", "raise"}:
                     if self.menu_audio:
@@ -265,11 +295,28 @@ class PokerGame:
                     self._select_action(action)
         return None
 
+    def _add_chip(self, value: int) -> None:
+        if self.prepared is None or self.selected_action not in {"bet", "raise"}:
+            return
+        maximum = self.prepared.scenario.effective_stack
+        if sum(self.selected_chips) + value <= maximum:
+            self.selected_chips.append(value)
+            self.selected_amount = sum(self.selected_chips)
+
+    def _remove_selected_chip(self, position: tuple[int, int]) -> bool:
+        for rect, _value in self.selected_chip_rects:
+            if rect.collidepoint(position):
+                self.selected_chips.pop()
+                self.selected_amount = sum(self.selected_chips) if self.selected_chips else None
+                return True
+        return False
+
     def _select_action(self, action: str) -> None:
         if self.prepared is None or action not in self.prepared.scenario.legal_actions:
             return
         if action != self.selected_action:
             self.selected_amount = None
+            self.selected_chips.clear()
         self.selected_action = action
         if action not in {"bet", "raise"}:
             self.selected_amount = None
@@ -322,25 +369,12 @@ class PokerGame:
         button_width = 130
         gap = 14
         total_width = len(legal) * button_width + max(0, len(legal) - 1) * gap
-        first_x = 415 + max(0, (500 - total_width) // 2)
+        first_x = 565 + max(0, (680 - total_width) // 2)
         self.action_buttons = [
             (pygame.Rect(first_x + index * (button_width + gap), 520, button_width, 46), action)
             for index, action in enumerate(legal)
         ]
         self.size_buttons = []
-        if self.selected_action == "bet":
-            sizes = self.prepared.scenario.candidate_bet_sizes
-        elif self.selected_action == "raise":
-            sizes = self.prepared.scenario.candidate_raise_sizes
-        else:
-            sizes = ()
-        size_width = 110
-        total_size_width = len(sizes) * size_width + max(0, len(sizes) - 1) * 10
-        size_x = 415 + max(0, (500 - total_size_width) // 2)
-        self.size_buttons = [
-            (pygame.Rect(size_x + index * (size_width + 10), 585, size_width, 42), amount)
-            for index, amount in enumerate(sizes)
-        ]
 
     def _hover_at(self, position: tuple[int, int]) -> tuple[str, int | str] | None:
         for rect, action in self.action_buttons:
@@ -354,13 +388,17 @@ class PokerGame:
         return None
 
     def draw(self) -> None:
-        self.screen.fill("#154734")
+        self.screen.fill("#063b2b")
         if self.phase == "loading":
             self._draw_loading()
         elif self.phase == "summary":
             self._draw_summary()
         elif self.prepared is not None:
             self._draw_scenario()
+
+    def _draw_panel(self, rect: pygame.Rect) -> None:
+        pygame.draw.rect(self.screen, "#082e24", rect, border_radius=16)
+        pygame.draw.rect(self.screen, "#b88732", rect, width=2, border_radius=16)
 
     def _draw_loading(self) -> None:
         title = self.title_font.render("POKER DECISION TABLE", True, "#f7e9b9")
@@ -377,51 +415,66 @@ class PokerGame:
     def _draw_scenario(self) -> None:
         assert self.prepared is not None
         scenario = self.prepared.scenario
-        self._text("POKER DECISION TABLE", (35, 25), 38, "#f7e9b9")
-        self._text(f"Poker Round {self.round_number}/{POKER_ROUNDS}", (1030, 30), 24, "#f1d277")
-        self._text(f"{scenario.street.upper()}  |  You - {scenario.hero_position}", (35, 75), 27, "#f1d277")
+        self._draw_panel(pygame.Rect(35, 88, 760, 350))
+        self._draw_panel(pygame.Rect(820, 88, 425, 350))
+        self._draw_panel(pygame.Rect(35, 450, 500, 220))
+        self._draw_panel(pygame.Rect(550, 450, 695, 220))
+        title = self.title_font.render("POKER DECISION TABLE", True, "#f7e9b9")
+        self.screen.blit(title, title.get_rect(center=(640, 38)))
+        self._text(f"ROUND {self.round_number}/{POKER_ROUNDS}", (1050, 38), 22, "#f1d277")
+        self._text(f"{scenario.street.upper()}  •  YOU: {scenario.hero_position}", (60, 112), 24, "#f1d277")
         self._text(
-            f"Your stack {scenario.hero_stack}   Pot {scenario.pot}   To call {scenario.amount_to_call}   "
-            f"Min raise-to {scenario.minimum_raise_to}",
-            (35, 105),
+            f"Your stack ${scenario.hero_stack}   Pot ${scenario.pot}   To call ${scenario.amount_to_call}   "
+            f"Min raise-to ${scenario.minimum_raise_to}",
+            (60, 145),
             22,
         )
 
-        self._text("YOU", (55, 155), 22, "#d8d0b8")
+        self._text("YOUR HAND", (60, 185), 22, "#f1d277")
         for index, card in enumerate(scenario.hero_cards):
-            self._draw_card(card, (55 + index * 92, 185))
-        self._text("BOARD", (310, 155), 22, "#d8d0b8")
+            self._draw_card(card, (60 + index * 92, 220))
+        self._text("BOARD", (310, 185), 22, "#f1d277")
         if scenario.board:
             for index, card in enumerate(scenario.board):
-                self._draw_card(card, (310 + index * 92, 185))
+                self._draw_card(card, (310 + index * 92, 220))
         else:
-            self._text("No community cards", (310, 205), 22, "#b9ad8f")
+            self._text("No community cards yet", (310, 240), 20, "#b9ad8f")
 
-        self._text("PLAYERS", (820, 140), 22, "#f1d277")
+        self._text("PLAYERS", (850, 115), 22, "#f1d277")
         for index, row in enumerate(build_table_rows(scenario, self.record)):
             color = "#f1d277" if row.is_you else "#777777" if row.state == "FOLDED" else "#ffffff"
+            status = row.status_text
+            if len(status) > 34:
+                status = status[:31] + "..."
             self._text(
-                f"{row.name:<3} {row.position:<3} {row.stack:>4}  {row.status_text}",
-                (820, 170 + index * 23),
-                17,
+                f"{row.position:<3} ${row.stack:>4}  {status}",
+                (850, 150 + index * 23),
+                15,
                 color,
             )
-        self._text("ACTION HISTORY", (820, 340), 20, "#f1d277")
+        self._text("ACTION HISTORY", (850, 320), 20, "#f1d277")
         history_lines = [action.describe() for action in scenario.action_history]
         if self.record is not None:
             history_lines = [action.describe() for action in self.record.final_action_history]
         else:
             history_lines.append("-> YOU to act")
+        history_font = serif_font(14)
+        history_clip = pygame.Rect(840, 340, 390, 92)
+        previous_clip = self.screen.get_clip()
+        self.screen.set_clip(history_clip)
         for index, line in enumerate(history_lines[-6:]):
-            self._text(line, (820, 366 + index * 21), 16, "#d8d0b8")
+            while len(line) > 1 and history_font.size(line)[0] > history_clip.width:
+                line = line[:-1]
+            self.screen.blit(history_font.render(line, True, "#d8d0b8"), (850, 342 + index * 15))
+        self.screen.set_clip(previous_clip)
 
         if self.phase == "result" and self.record is not None:
             self._draw_recorded_result()
             return
 
-        self._text("CONFIDENCE", (55, 472), 20, "#d8d0b8")
-        self._text("How confident are you that this entire decision is best?", (55, 493), 17, "#d8d0b8")
-        self._text("Not your chance to win.", (55, 557), 17, "#b9ad8f")
+        self._text("CONFIDENCE", (60, 475), 22, "#f1d277")
+        self._text("How confident are you in this decision?", (60, 505), 18, "#d8d0b8")
+        self._text("This measures decision quality, not luck.", (60, 530), 17, "#b9ad8f")
         pygame.draw.rect(self.screen, "#3b2418", CONFIDENCE_TRACK, border_radius=7)
         pygame.draw.rect(self.screen, "#b88732", CONFIDENCE_TRACK, width=2, border_radius=7)
         if self.confidence_percent is not None:
@@ -430,11 +483,11 @@ class PokerGame:
             confidence = f"{self.confidence_percent}%"
         else:
             confidence = "UNSET - click or move slider"
-        self._text("0%", (45, 539), 17, "#d8d0b8")
-        self._text("100%", (300, 539), 17, "#d8d0b8")
-        self._text(confidence, (105, 580), 22, "#f1d277")
+        self._text("0%", (70, 582), 17, "#d8d0b8")
+        self._text("100%", (455, 582), 17, "#d8d0b8")
+        self._text(confidence, (190, 615), 22, "#f1d277")
 
-        self._text("LEGAL ACTIONS", (565, 482), 20, "#d8d0b8")
+        self._text("BETTING", (575, 475), 22, "#f1d277")
         for rect, action in self.action_buttons:
             self._draw_button(
                 rect,
@@ -442,17 +495,8 @@ class PokerGame:
                 self.hover_token == ("action", action),
                 selected=self.selected_action == action,
             )
-        if self.size_buttons:
-            assert self.selected_action is not None
-            self._text(f"SELECT {self.selected_action.upper()} SIZE", (565, 568), 18, "#d8d0b8")
-            for rect, amount in self.size_buttons:
-                self._draw_button(
-                    rect,
-                    self._size_label(amount),
-                    self.hover_token == ("size", amount),
-                    small=True,
-                    selected=self.selected_amount == amount,
-                )
+        if self.selected_action in {"bet", "raise"}:
+            self._draw_chip_controls()
         self._draw_button(
             self.lock_button_rect,
             "LOCK DECISION",
@@ -466,8 +510,70 @@ class PokerGame:
                 guidance = "Choose one legal action"
             else:
                 guidance = f"Choose a valid {self.selected_action} size"
-            self._text(guidance, (985, 637), 18, "#b9ad8f")
+            if self.selected_action not in {"bet", "raise"}:
+                self._text(guidance, (800, 568), 14, "#b9ad8f")
         self._text("ESC: return to casino floor", (35, 680), 20, "#d8d0b8")
+
+    def _draw_chip_controls(self) -> None:
+        assert self.prepared is not None
+        self.chip_rects = []
+        self._text(f"WAGER (1-${self.prepared.scenario.hero_stack})", (800, 470), 20, "#f1d277")
+        self._text("CLICK CHIPS TO BUILD YOUR WAGER", (800, 495), 16, "#d8d0b8")
+        sizes = self._available_sizes()
+        if sizes:
+            label = "RAISE TO:" if self.selected_action == "raise" else "BET TO:"
+            options = "  ".join(f"${amount}" for amount in sizes)
+            self._text(f"{label} {options}", (800, 568), 14, "#f1d277")
+        origin_x, origin_y = CHIP_TRAY_ORIGIN
+        step_x, step_y = CHIP_TRAY_STEP
+        remaining = self.prepared.scenario.effective_stack - sum(self.selected_chips)
+        for row in range(2):
+            for column, (value, color) in enumerate(
+                zip(CHIP_VALUES[row * 3:(row + 1) * 3], CHIP_COLORS[row * 3:(row + 1) * 3])
+            ):
+                rect = pygame.Rect(
+                    origin_x + column * step_x,
+                    origin_y + row * step_y,
+                    *CHIP_DISPLAY_SIZE,
+                )
+                self.chip_rects.append((rect, value))
+                chip = pygame.transform.smoothscale(self.chip_images[value], CHIP_DISPLAY_SIZE)
+                if value > remaining:
+                    chip = chip.copy()
+                    chip.set_alpha(80)
+                self.screen.blit(chip, rect)
+                self._text(f"${value}", (rect.x + 42, rect.y + 8), 17, "#f1d277")
+
+        pygame.draw.rect(self.screen, "#24170f", WAGER_FIELD, border_radius=8)
+        pygame.draw.rect(self.screen, "#b88732", WAGER_FIELD, width=2, border_radius=8)
+        self._draw_selected_chips()
+        amount = self.selected_amount if self.selected_amount is not None else "_"
+        wager = self.font.render(f"${amount}", True, "#f1d277")
+        self.screen.blit(wager, wager.get_rect(center=(WAGER_FIELD.centerx + 14, WAGER_FIELD.centery)))
+        if self.selected_chips and self.selected_amount not in self._available_sizes():
+            self._text("Choose a modeled total", (800, 635), 16, "#b9ad8f")
+
+    def _available_sizes(self) -> tuple[int, ...]:
+        if self.prepared is None:
+            return ()
+        if self.selected_action == "bet":
+            return self.prepared.scenario.candidate_bet_sizes
+        if self.selected_action == "raise":
+            return self.prepared.scenario.candidate_raise_sizes
+        return ()
+
+    def _draw_selected_chips(self) -> None:
+        self.selected_chip_rects = []
+        if not self.selected_chips:
+            return
+        base = pygame.Rect(WAGER_FIELD.left + 6, WAGER_FIELD.top + 6, 30, 30)
+        visible = min(len(self.selected_chips), 8)
+        click_rect = base.move(0, -(visible - 1) * 2)
+        click_rect.height += (visible - 1) * 2
+        self.selected_chip_rects.append((click_rect, self.selected_chips[-1]))
+        for index, value in enumerate(self.selected_chips[-visible:]):
+            chip = pygame.transform.smoothscale(self.chip_images[value], base.size)
+            self.screen.blit(chip, base.move(0, -index * 2))
 
     def _draw_recorded_result(self) -> None:
         assert self.record is not None
@@ -475,7 +581,7 @@ class PokerGame:
         pygame.draw.rect(self.screen, "#21130f", panel, border_radius=12)
         pygame.draw.rect(self.screen, "#d29a32", panel, width=3, border_radius=12)
         self._text("DECISION RECORDED", (505, 500), 31, "#f1d277")
-        amount = f" to {self.record.player_amount}" if self.record.player_action in {"bet", "raise"} else ""
+        amount = f" to ${self.record.player_amount}" if self.record.player_action in {"bet", "raise"} else ""
         self._text(
             f"{self.record.player_action.upper()}{amount}   |   confidence {self.record.confidence_percent}%",
             (425, 545),
@@ -508,9 +614,9 @@ class PokerGame:
         self._text(calibration, (360, 257), 22, "#d8d0b8")
 
         self._text("EXPECTED VALUE", (360, 310), 24, "#f1d277")
-        self._text(f"Your choices: {summary.get('chosen_total_ev', 0):+.1f} chips", (360, 342), 24)
-        self._text(f"Model-preferred choices: {summary.get('best_total_ev', 0):+.1f} chips", (360, 372), 24)
-        self._text(f"Value left on the table: {summary.get('value_left_on_table', 0):.1f} chips", (360, 402), 24)
+        self._text(f"Your choices: ${summary.get('chosen_total_ev', 0):+.1f}", (360, 342), 24)
+        self._text(f"Model-preferred choices: ${summary.get('best_total_ev', 0):+.1f}", (360, 372), 24)
+        self._text(f"Value left on the table: ${summary.get('value_left_on_table', 0):.1f}", (360, 402), 24)
 
         self._text("WHAT THE HOUSE NOTICED", (360, 455), 24, "#f1d277")
         for index, observation in enumerate(summary.get("observations", [])):
@@ -553,16 +659,16 @@ class PokerGame:
     def _action_label(self, action: str) -> str:
         assert self.prepared is not None
         if action == "call":
-            return f"CALL {self.prepared.scenario.amount_to_call}"
+            return f"CALL ${self.prepared.scenario.amount_to_call}"
         return action.upper()
 
     def _size_label(self, amount: int) -> str:
         assert self.prepared is not None
         maximum = self.prepared.scenario.hero_contribution + self.prepared.scenario.hero_stack
-        return "ALL-IN" if amount == maximum else str(amount)
+        return "ALL-IN" if amount == maximum else f"${amount}"
 
     def _text(self, text: str, position: tuple[int, int], size: int, color: str = "#ffffff") -> None:
-        self.screen.blit(pygame.font.Font(None, size).render(text, True, color), position)
+        self.screen.blit(serif_font(size).render(text, True, color), position)
 
     # Deliberately empty integration hooks for a later local Poker voice system.
     def on_poker_session_start(self) -> None:

@@ -16,7 +16,9 @@ CARD_SIZE = (150, 210)
 PLAYER_SIZE = (96, 96)
 PLAYER_COLLISION_SIZE = (32, 32)
 PLAYER_DISPLAY_SIZE = (72, 96)
-BARTENDER_DISPLAY_SIZE = (48, 72)
+SLOT_PLAYER_DISPLAY_SIZE = (54, 72)
+DEALER_DISPLAY_SIZE = (54, 72)
+BARTENDER_DISPLAY_SIZE = (54, 81)
 STOOL_DISPLAY_SIZE = (42, 59)
 BEER_DISPLAY_SIZE = (18, 23)
 CUP_DISPLAY_SIZE = (16, 22)
@@ -33,11 +35,17 @@ BARTENDER_IMAGE = ASSETS / "bartender.png"
 STOOL_IMAGE = ASSETS / "stool.png"
 BEER_IMAGE = ASSETS / "beer.png"
 CUP_IMAGE = ASSETS / "cup.png"
+DEALER_IMAGE = ASSETS / "dealer.png"
+BARTENDER_PORTRAIT_IMAGE = ASSETS / "bartender_portrait.png"
+BARTENDER_BACKGROUND_IMAGE = ASSETS / "bartender_background.png"
 POKER_TABLE_IMAGE = ASSETS / "poker_table_clean.png"
 BLACKJACK_TABLE_IMAGE = ASSETS / "blackjack_table_clean.png"
 CHARACTER_SHEET = ASSETS / "2D Top Down Pixel Art Characters" / "000.png"
 CASINO_TILESET = CASINO_DIRECTORY / "2D_TopDown_Tileset_Casino_1024x512.png"
 SLOT_MACHINE_SHEET = CASINO_DIRECTORY / "Animated Sprite Sheets" / "SlotMachinesAnimationSheet_0.png"
+SLOT_PLAYER_IMAGE = ASSETS / "slot_player.png"
+SLOT_PLAYER_RIGHT_IMAGE = ASSETS / "slot_player_right.png"
+BARTENDER_INTERACTION_DISTANCE = 125
 TABLE = pygame.Rect(465, 250, 350, 220)
 DEBUG_MENU_HITBOXES = False
 
@@ -59,6 +67,15 @@ def load_ui_assets() -> tuple[pygame.Surface, pygame.Surface, pygame.Surface]:
     options_menu = pygame.image.load(options_matches[0]).convert_alpha()
     settings_menu = pygame.image.load(find_image_asset("settings")).convert_alpha()
     return home_button, options_menu, settings_menu
+
+
+def load_bartender_dialogue_assets() -> tuple[pygame.Surface, pygame.Surface]:
+    background = pygame.image.load(BARTENDER_PORTRAIT_IMAGE).convert()
+    portrait = pygame.image.load(BARTENDER_BACKGROUND_IMAGE).convert()
+    return (
+        pygame.transform.smoothscale(background, WINDOW_SIZE),
+        pygame.transform.smoothscale(portrait, (390, 390)),
+    )
 
 
 def scaled_options_menu(image: pygame.Surface, screen_size: tuple[int, int]) -> pygame.Surface:
@@ -130,7 +147,7 @@ SLOT_MACHINE_CENTERS = (
 )
 TABLE_INTERACTION_DISTANCE = 190
 SLOT_MACHINE_INTERACTION_DISTANCE = 120
-BEVERAGE_POSITIONS = ((600, 245), (640, 245), (680, 245))
+BEVERAGE_POSITIONS = ((585, 255), (640, 245), (695, 255))
 STOOL_POSITIONS = (
     (145, 550),
     (300, 590),
@@ -180,6 +197,14 @@ def load_slot_machine_animation() -> list[pygame.Surface]:
     return frames
 
 
+def load_slot_player(image_path: Path) -> pygame.Surface:
+    image = pygame.image.load(image_path).convert()
+    image.set_colorkey((0, 0, 0))
+    cropped = image.subsurface(visible_asset_rect(image)).copy()
+    cropped.set_colorkey((0, 0, 0))
+    return pygame.transform.scale(cropped, SLOT_PLAYER_DISPLAY_SIZE)
+
+
 def load_bartender() -> pygame.Surface:
     if BARTENDER_IMAGE.exists():
         image = pygame.image.load(BARTENDER_IMAGE).convert()
@@ -202,6 +227,14 @@ def load_stool() -> pygame.Surface:
     cropped = image.subsurface((400, 420, 450, 650)).copy()
     cropped.set_colorkey((0, 0, 0))
     return pygame.transform.scale(cropped, STOOL_DISPLAY_SIZE)
+
+
+def load_dealer() -> pygame.Surface:
+    image = pygame.image.load(DEALER_IMAGE).convert()
+    image.set_colorkey((0, 0, 0))
+    cropped = image.subsurface((197, 191, 630, 1142)).copy()
+    cropped.set_colorkey((0, 0, 0))
+    return pygame.transform.scale(cropped, DEALER_DISPLAY_SIZE)
 
 
 def load_poker_table() -> pygame.Surface:
@@ -296,7 +329,10 @@ def load_casino_scenes() -> tuple[
     list[pygame.Surface],
     pygame.Surface,
     pygame.Surface,
+    pygame.Surface,
+    pygame.Surface,
     list[pygame.Surface],
+    pygame.Surface,
     pygame.Surface,
     pygame.Surface,
     pygame.Surface,
@@ -317,9 +353,12 @@ def load_casino_scenes() -> tuple[
         load_bartender(),
         pygame.transform.scale(drink, (22, 45)),
         load_slot_machine_animation(),
+        load_slot_player(SLOT_PLAYER_IMAGE),
+        load_slot_player(SLOT_PLAYER_RIGHT_IMAGE),
         load_stool(),
         load_beer(),
         load_cup(),
+        load_dealer(),
     )
 
 
@@ -334,15 +373,26 @@ def draw_room(
     stool: pygame.Surface,
     drink: pygame.Surface,
     slot_machine_frames: list[pygame.Surface],
+    slot_player: pygame.Surface,
+    slot_player_right: pygame.Surface,
     slot_machine_frame: int,
     show_tutorial: bool,
     beer: pygame.Surface,
     cup: pygame.Surface,
+    dealer: pygame.Surface,
 ) -> None:
     screen.blit(background, (0, 0))
     slot_machine = slot_machine_frames[slot_machine_frame]
     for center in SLOT_MACHINE_CENTERS:
         screen.blit(slot_machine, slot_machine.get_rect(center=center))
+    screen.blit(
+        slot_player,
+        slot_player.get_rect(midbottom=(SLOT_MACHINE_CENTERS[0].x - 18, 170)),
+    )
+    screen.blit(
+        slot_player_right,
+        slot_player_right.get_rect(midbottom=(SLOT_MACHINE_CENTERS[4].x - 18, 170)),
+    )
     nearby_tables = [
         (player.distance_to(CARD_TABLE_CENTER), tables[0], CARD_TABLE_CENTER, "play poker"),
         (player.distance_to(BLACKJACK_TABLE_CENTER), tables[2], BLACKJACK_TABLE_CENTER, "play blackjack"),
@@ -353,20 +403,65 @@ def draw_room(
         glow_rect = table.get_rect(center=center).inflate(18, 18)
         pygame.draw.ellipse(glow, (246, 211, 74, 130), glow_rect, width=8)
         screen.blit(glow, (0, 0))
+    dealer_position = (CARD_TABLE_CENTER.x, CARD_TABLE_CENTER.y - 90)
+    screen.blit(dealer, dealer.get_rect(midbottom=dealer_position))
     screen.blit(tables[0], tables[0].get_rect(center=CARD_TABLE_CENTER))
-    screen.blit(bartender, bartender.get_rect(midbottom=(CENTER_TABLE_CENTER.x, CENTER_TABLE_CENTER.y - 15)))
+    screen.blit(bartender, bartender.get_rect(midbottom=(CENTER_TABLE_CENTER.x, CENTER_TABLE_CENTER.y + 20)))
     screen.blit(tables[1], tables[1].get_rect(center=CENTER_TABLE_CENTER))
     for index, position in enumerate(BEVERAGE_POSITIONS):
-        beverage = beer if index == 0 else cup
+        beverage = beer if index == 1 else cup
         screen.blit(beverage, beverage.get_rect(center=position))
+    dealer_position = (BLACKJACK_TABLE_CENTER.x, BLACKJACK_TABLE_CENTER.y - 80)
+    screen.blit(dealer, dealer.get_rect(midbottom=dealer_position))
     screen.blit(tables[2], tables[2].get_rect(center=BLACKJACK_TABLE_CENTER))
     for position in STOOL_POSITIONS:
         screen.blit(stool, stool.get_rect(center=position))
     screen.blit(image, image.get_rect(center=player))
-    if nearby_tables:
-        _, _, _, action = min(nearby_tables, key=lambda item: item[0])
-        prompt = font.render(f"Press E to {action}", True, "#ffffff")
-        screen.blit(prompt, prompt.get_rect(center=(WINDOW_SIZE[0] // 2, WINDOW_SIZE[1] // 2)))
+    nearby_interactions = [
+        (distance, action)
+        for distance, _, _, action in nearby_tables
+    ]
+    bartender_distance = player.distance_to(CENTER_TABLE_CENTER)
+    if bartender_distance < BARTENDER_INTERACTION_DISTANCE:
+        nearby_interactions.append((bartender_distance, "interact"))
+    if nearby_interactions:
+        _, action = min(nearby_interactions, key=lambda item: item[0])
+        prompt = serif_font(30, True).render(f"Press E to {action}", True, "#f7e9b9")
+        screen.blit(prompt, prompt.get_rect(center=(WINDOW_SIZE[0] // 2, 610)))
+
+
+def draw_bartender_dialogue(
+    screen: pygame.Surface,
+    background: pygame.Surface,
+    portrait: pygame.Surface,
+    page: int,
+) -> None:
+    screen.blit(background, (0, 0))
+    overlay = pygame.Surface(WINDOW_SIZE, pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 105))
+    screen.blit(overlay, (0, 0))
+    portrait_rect = portrait.get_rect(bottomright=(WINDOW_SIZE[0], WINDOW_SIZE[1]))
+    screen.blit(portrait, portrait_rect)
+
+    dialogue_box = pygame.Surface((890, 170), pygame.SRCALPHA)
+    dialogue_box.fill((0, 0, 0, 190))
+    pygame.draw.rect(dialogue_box, "#d29a32", dialogue_box.get_rect(), width=2, border_radius=10)
+    screen.blit(dialogue_box, (0, 550))
+    text_font = serif_font(28, True)
+    message_lines = (
+        ("Hey, nice to meet you.",)
+        if page == 0
+        else (
+            "We have blackjack and poker for you to try out.",
+            "Have fun and enjoy!",
+        )
+    )
+    for line_index, line in enumerate(message_lines):
+        message = text_font.render(line, True, "#f7e9b9")
+        screen.blit(message, (30, 580 + line_index * 38))
+    hint_text = "CLICK / ENTER: next     ESC: return to the casino floor" if page == 0 else "ESC: return to the casino floor"
+    hint = serif_font(20).render(hint_text, True, "#d8d0b8")
+    screen.blit(hint, (30, 685))
 
 
 def draw_card_game(
@@ -421,8 +516,21 @@ def main() -> None:
 
     try:
         player_animations = load_player_animations()
-        casino_background, casino_tables, bartender, drink, slot_machine_frames, stool, beer, cup = load_casino_scenes()
+        (
+            casino_background,
+            casino_tables,
+            bartender,
+            drink,
+            slot_machine_frames,
+            slot_player,
+            slot_player_right,
+            stool,
+            beer,
+            cup,
+            dealer,
+        ) = load_casino_scenes()
         home_button_image, options_menu_image, settings_menu_image = load_ui_assets()
+        bartender_dialogue_background, bartender_portrait = load_bartender_dialogue_assets()
     except FileNotFoundError as error:
         pygame.quit()
         raise SystemExit(error) from error
@@ -433,6 +541,15 @@ def main() -> None:
         furniture_collision_rect(casino_tables[0], CARD_TABLE_CENTER, 30, 45),
         furniture_collision_rect(casino_tables[2], BLACKJACK_TABLE_CENTER, 30, 40),
     ]
+    center_table_rect = casino_tables[1].get_rect(center=CENTER_TABLE_CENTER)
+    collision_rects.append(
+        pygame.Rect(
+            center_table_rect.centerx - 110,
+            center_table_rect.bottom - 65,
+            220,
+            24,
+        )
+    )
     player = pygame.Vector2(80, 600)
     facing = "right"
     animation_frame = 0
@@ -457,6 +574,7 @@ def main() -> None:
     slot_machine_frame = 0
     slot_machine_timer = 0.0
     show_tutorial = True
+    bartender_dialogue_page = 0
     running = True
 
     def open_game_options() -> None:
@@ -538,6 +656,14 @@ def main() -> None:
                 if action == "room":
                     mode = "room"
                 continue
+            if mode == "bartender":
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    mode = "room"
+                elif event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    bartender_dialogue_page = min(1, bartender_dialogue_page + 1)
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    bartender_dialogue_page = min(1, bartender_dialogue_page + 1)
+                continue
             if mode == "slots":
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     mode = "room"
@@ -563,6 +689,7 @@ def main() -> None:
                     activate_option(options_selected_index, now)
                 elif mode == "room" and event.key == pygame.K_e:
                     interactions = (
+                        (player.distance_to(CENTER_TABLE_CENTER), BARTENDER_INTERACTION_DISTANCE, "bartender"),
                         (player.distance_to(CARD_TABLE_CENTER), TABLE_INTERACTION_DISTANCE, "poker"),
                         (player.distance_to(BLACKJACK_TABLE_CENTER), TABLE_INTERACTION_DISTANCE, "blackjack"),
                         *(
@@ -580,6 +707,10 @@ def main() -> None:
                         audio.stop_footsteps()
                         poker_game = PokerGame(screen, player_state, menu_audio=menu.audio)
                         mode = "poker"
+                    elif nearest[2] == "bartender":
+                        audio.stop_footsteps()
+                        bartender_dialogue_page = 0
+                        mode = "bartender"
                     elif nearest[2] == "blackjack":
                         audio.stop_footsteps()
                         show_tutorial = False
@@ -624,6 +755,13 @@ def main() -> None:
         elif mode == "poker" and poker_game is not None:
             poker_game.update()
             poker_game.draw()
+        elif mode == "bartender":
+            draw_bartender_dialogue(
+                screen,
+                bartender_dialogue_background,
+                bartender_portrait,
+                bartender_dialogue_page,
+            )
         elif mode == "slots":
             draw_slot_machine_game(screen, slot_machine_frames[slot_machine_frame], title_font, font)
         elif mode == "blackjack" and blackjack_game is not None:
@@ -694,10 +832,13 @@ def main() -> None:
                 stool,
                 drink,
                 slot_machine_frames,
+                slot_player,
+                slot_player_right,
                 slot_machine_frame,
                 show_tutorial,
                 beer,
                 cup,
+                dealer,
             )
 
             screen_width, screen_height = screen.get_size()
