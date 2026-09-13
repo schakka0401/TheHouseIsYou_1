@@ -28,6 +28,10 @@ class PokerScenarioGenerator:
 
     def __init__(self, seed: int | None = None, equity_simulations: int = EQUITY_SIMULATIONS) -> None:
         self.random = random.Random(seed)
+        # Keep one example of each intended street/archetype, but vary the
+        # order so every session does not present the same five prompts.
+        self.archetype_order = list(ARCHETYPES)
+        self.random.shuffle(self.archetype_order)
         self.range_model = PokerRangeModel()
         self.equity_estimator = PokerEquityEstimator(
             self.range_model,
@@ -46,7 +50,7 @@ class PokerScenarioGenerator:
         if hero_stack <= 0:
             raise ValueError("Hero needs chips to receive a Poker scenario")
         started = time.perf_counter()
-        archetype = ARCHETYPES[round_index - 1]
+        archetype = self.archetype_order[round_index - 1]
         smallest_margin = float("inf")
         for _attempt in range(8):
             scenario = getattr(self, f"_build_{archetype}")(hero_stack)

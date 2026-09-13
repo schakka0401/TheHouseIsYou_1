@@ -182,7 +182,10 @@ class RangeEquityAndEVTests(unittest.TestCase):
     def test_generated_session_has_legal_unique_diverse_scenarios(self) -> None:
         generator = PokerScenarioGenerator(seed=4, equity_simulations=250)
         rounds = [generator.generate_round(index, 200) for index in range(1, 6)]
-        self.assertEqual([item.scenario.street for item in rounds], ["preflop", "flop", "turn", "turn", "river"])
+        self.assertEqual(
+            sorted(item.scenario.street for item in rounds),
+            ["flop", "preflop", "river", "turn", "turn"],
+        )
         for item in rounds:
             scenario = item.scenario
             known = scenario.hero_cards + scenario.board

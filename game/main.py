@@ -629,8 +629,6 @@ def main() -> None:
         elif mode == "blackjack" and blackjack_game is not None:
             blackjack_game.update()
             blackjack_game.draw()
-        elif mode == "poker" and poker_game is not None:
-            poker_game.draw()
         else:
             # The room remains visible beneath the pause panel, but no gameplay
             # input, interaction, animation, or footsteps run while paused.
