@@ -45,7 +45,9 @@ class PokerSessionTracker:
             key != prepared.evaluation.best_key
             for key in prepared.evaluation.near_equivalent_keys
         )
-        if acceptable_action and (prepared.evaluation.model_sensitive or competing_near_equal):
+        if prepared.evaluation.model_sensitive:
+            classification = "CLOSE / MODEL-SENSITIVE"
+        elif acceptable_action and competing_near_equal:
             classification = "CLOSE / MODEL-SENSITIVE"
         elif acceptable_action:
             classification = "REASONABLE"

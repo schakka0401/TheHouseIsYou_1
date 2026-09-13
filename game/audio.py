@@ -21,19 +21,29 @@ class AudioManager:
         self.steps: list[pygame.mixer.Sound] = []
         self.footstep_channel = None
         self.ui_channel = None
+        self.interaction_channel = None
+        self.interaction_sounds: dict[str, pygame.mixer.Sound] = {}
         try:
             if pygame.mixer.get_init() is None:
                 pygame.mixer.init()
             self.available = True
-            # Keep world footsteps and UI feedback on channels which cannot be
-            # borrowed by Sound.play(). Pausing the world may stop channel 0,
-            # but can never cut off a switch/click playing on channel 1.
-            pygame.mixer.set_reserved(2)
+            # Keep world footsteps, UI feedback, and NPC interaction audio on
+            # channels which cannot be borrowed by Sound.play(). This lets
+            # button hover sounds play without cutting off dealer dialogue.
+            pygame.mixer.set_reserved(3)
             self.footstep_channel = pygame.mixer.Channel(0)
             self.ui_channel = pygame.mixer.Channel(1)
+            self.interaction_channel = pygame.mixer.Channel(2)
             self.steps = [self._load_sound("step0"), self._load_sound("step1")]
             for sound in self.steps:
                 self.register_sound(sound, FOOTSTEP_VOLUME)
+            for name in ("bartender_interact", "poker_interact", "blackjack_interact"):
+                try:
+                    sound = self._load_sound(name)
+                except (pygame.error, FileNotFoundError):
+                    continue
+                self.interaction_sounds[name] = sound
+                self.register_sound(sound, 0.85)
         except (pygame.error, FileNotFoundError):
             self.available = False
             self.steps = []
@@ -88,6 +98,13 @@ class AudioManager:
     def play_ui(self, sound: pygame.mixer.Sound) -> None:
         if self.available and self.ui_channel is not None:
             self.ui_channel.play(sound)
+
+    def play_interaction(self, npc: str) -> None:
+        """Play a loaded NPC interaction cue without interrupting UI sounds."""
+        sound = self.interaction_sounds.get(f"{npc}_interact")
+        if sound is not None:
+            if self.available and self.interaction_channel is not None:
+                self.interaction_channel.play(sound)
 
     def stop_footsteps(self) -> None:
         if self.footstep_channel is not None:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+from dataclasses import replace
 import inspect
 import io
 import unittest
@@ -168,6 +169,22 @@ class PokerTableAndHistoryTests(unittest.TestCase):
 
 
 class PokerFeedbackSemanticsTests(unittest.TestCase):
+    def test_unstable_preference_cannot_be_labeled_a_clear_mistake(self) -> None:
+        prepared = prepared_fixture()
+        unstable = replace(
+            prepared,
+            evaluation=replace(
+                prepared.evaluation,
+                sensitivity_best_keys=("raise_90", "call"),
+                model_sensitive=True,
+            ),
+        )
+        tracker = PokerSessionTracker()
+        with redirect_stdout(io.StringIO()):
+            record = tracker.lock_decision(unstable, 1, "fold", None, 90)
+        self.assertFalse(record.acceptable_action)
+        self.assertEqual(record.decision_classification, "CLOSE / MODEL-SENSITIVE")
+
     def test_near_equivalent_is_reasonable_but_not_exactly_preferred(self) -> None:
         tracker = PokerSessionTracker()
         with redirect_stdout(io.StringIO()):

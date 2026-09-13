@@ -15,7 +15,7 @@ from game.poker_models import (
     PokerActionEvaluation,
     PokerScenario,
 )
-from game.poker_ranges import PROFILE_CONFIG, PokerRangeModel
+from game.poker_ranges import PokerRangeModel
 
 
 RAISE_EV_TOLERANCE = 0.03
@@ -118,7 +118,16 @@ class PokerEVModel:
                     for option in options
                 ]
                 sensitivity_best_keys.append(max(varied, key=lambda candidate: candidate.ev).key)
-        model_sensitive = len({self._decision_family(key) for key in sensitivity_best_keys}) > 1
+        oversized_shove_review = (
+            best.key == "all_in"
+            and best.amount is not None
+            and best.amount - scenario.hero_contribution > 1.5 * max(1, scenario.pot)
+            and scenario.spr > 2.0
+        )
+        model_sensitive = (
+            len({self._decision_family(key) for key in sensitivity_best_keys}) > 1
+            or oversized_shove_review
+        )
         preferred_range = None
         if best.action in {"bet", "raise"}:
             size_tolerance = max(1.0, scenario.pot * RAISE_EV_TOLERANCE)
@@ -148,6 +157,7 @@ class PokerEVModel:
             near_equivalent_keys=near_equivalent,
             sensitivity_best_keys=tuple(sensitivity_best_keys),
             model_sensitive=model_sensitive,
+            oversized_shove_review=oversized_shove_review,
         )
 
     @staticmethod
@@ -248,10 +258,9 @@ class PokerEVModel:
                 final_pot = scenario.pot + hero_cost + caller_contributions
                 called_equity = called.equity
                 equity_standard_error = called.standard_error
-                branch_realization = 1.0 if hero_cost >= scenario.hero_stack else realization
-                branch_ev = called_equity * final_pot * branch_realization - hero_cost
+                branch_ev = called_equity * final_pot * realization - hero_cost
                 uncertainty_variance += (
-                    branch_probability * final_pot * branch_realization * equity_standard_error
+                    branch_probability * final_pot * realization * equity_standard_error
                 ) ** 2
             weighted_ev = branch_probability * branch_ev
             branches.append(AggressiveBranch(
@@ -269,6 +278,7 @@ class PokerEVModel:
             pot_before=scenario.pot,
             hero_cost=hero_cost,
             pressure=hero_cost / max(1, scenario.pot),
+            realization=realization,
             simulations_per_called_branch=simulations,
             opponent_responses=tuple(responses),
             branches=tuple(branches),

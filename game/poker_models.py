@@ -240,6 +240,7 @@ class AggressiveActionTrace:
     pot_before: int
     hero_cost: int
     pressure: float
+    realization: float
     simulations_per_called_branch: int
     opponent_responses: tuple[OpponentResponse, ...]
     branches: tuple[AggressiveBranch, ...]
@@ -268,6 +269,7 @@ class PokerActionEvaluation:
     near_equivalent_keys: tuple[str, ...] = ()
     sensitivity_best_keys: tuple[str, ...] = ()
     model_sensitive: bool = False
+    oversized_shove_review: bool = False
 
     @property
     def action_evs(self) -> dict[str, float]:
@@ -354,6 +356,7 @@ class PokerDecisionRecord:
             "near_equivalent_options": list(self.evaluation.near_equivalent_keys),
             "sensitivity_best_options": list(self.evaluation.sensitivity_best_keys),
             "model_sensitive": self.evaluation.model_sensitive,
+            "oversized_shove_review": self.evaluation.oversized_shove_review,
         }
 
 

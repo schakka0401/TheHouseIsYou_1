@@ -17,7 +17,7 @@ import time
 from game.poker_equity import PokerEquityEstimator
 from game.poker_ev import PokerEVModel
 from game.poker_hand_evaluator import evaluate_holdem
-from game.poker_models import ActionOption, Card, OpponentState, PokerAction, PokerScenario, RANK_VALUE, poker_deck
+from game.poker_models import ActionOption, Card, OpponentState, PokerAction, PokerScenario, RANK_VALUE, card_code, poker_deck
 from game.poker_ranges import PokerRangeModel
 from game.poker_scenarios import PokerScenarioGenerator
 
@@ -100,6 +100,12 @@ def audit_preferred_distribution(
         "by_street": by_street,
         "largest_frequency": sum(row["largest"] for row in rows) / len(rows),
         "all_in_frequency": len(all_ins) / len(rows),
+        "all_in_average_effective_stack": (
+            sum(row["scenario"].effective_stack for row in all_ins) / len(all_ins) if all_ins else 0.0
+        ),
+        "all_in_average_pot": (
+            sum(row["scenario"].pot for row in all_ins) / len(all_ins) if all_ins else 0.0
+        ),
         "all_in_average_effective_stack_to_pot": (
             sum(row["scenario"].effective_stack / max(1, row["scenario"].pot) for row in all_ins) / len(all_ins)
             if all_ins else 0.0
@@ -126,9 +132,40 @@ def print_preferred_distribution(summary: dict) -> None:
         )
     print(f"Largest sizing overall: {summary['largest_frequency']:.1%}")
     print(f"All-in overall:         {summary['all_in_frequency']:.1%}")
+    print(f"All-in average stack:   {summary['all_in_average_effective_stack']:.1f}")
+    print(f"All-in average pot:     {summary['all_in_average_pot']:.1f}")
     print(f"All-in average SPR:     {summary['all_in_average_effective_stack_to_pot']:.2f}")
     print(f"All-in average equity:  {summary['all_in_average_equity']:.1%}")
     print(f"All-in hand categories: {summary['all_in_categories']}")
+
+
+def find_representative_rows(
+    count: int = 240,
+    seed: int = 913,
+    equity_simulations: int = 1_500,
+    branch_simulations: int = 350,
+) -> dict[str, dict]:
+    """Locate reproducible suspicious-looking cases for full explanation."""
+    found: dict[str, dict] = {}
+    for index, scenario in enumerate(distribution_scenarios(count, seed)):
+        ranges = PokerRangeModel()
+        equity = PokerEquityEstimator(ranges, equity_simulations, seed + index).estimate(scenario)
+        evaluation = PokerEVModel(
+            ranges, branch_simulations, seed + 10_000 + index, sensitivity=False
+        ).evaluate(scenario, equity)
+        row = {"name": scenario.archetype, "scenario": scenario, "ranges": ranges,
+               "equity": equity, "evaluation": evaluation}
+        category = _hero_category(scenario)
+        if category == "one_pair" and evaluation.best_key == "all_in":
+            found.setdefault("one_pair_all_in", row)
+        if category in {"high_card", "offsuit"} and evaluation.best_key == "all_in":
+            found.setdefault("weak_max_raise", row)
+        ranks = {rank for rank, _suit in scenario.hero_cards}
+        if scenario.street == "preflop" and ranks == {"A", "J"} and evaluation.best_action == "fold":
+            found.setdefault("ace_jack_fold", row)
+        if len(found) == 3:
+            break
+    return found
 
 
 def _hero_category(scenario: PokerScenario) -> str:
@@ -262,6 +299,52 @@ def benchmark_scenarios() -> tuple[PokerBenchmark, ...]:
     )
 
 
+def recognizable_sanity_benchmarks() -> tuple[PokerBenchmark, ...]:
+    """Recognizable preflop and postflop checks; none encode chart answers."""
+    preflop = (
+        _benchmark("PF AA unopened", "AA unopened", "preflop", ("AS", "AH"), (), 15, 10,
+                   (("SB", "BALANCED", "POSTED 5", 5, False), ("BB", "LOOSE", "POSTED 10", 10, False), ("CO", "TIGHT", "FOLDED", 0, True))),
+        _benchmark("PF KK single open", "KK versus single open", "preflop", ("KS", "KH"), (), 45, 30,
+                   (("CO", "BALANCED", "RAISED TO 30", 30, False), ("SB", "TIGHT", "FOLDED", 5, True), ("BB", "LOOSE", "POSTED 10", 10, False))),
+        _benchmark("PF QQ early deep", "QQ early position, deep", "preflop", ("QS", "QH"), (), 15, 10,
+                   (("SB", "TIGHT", "POSTED 5", 5, False), ("BB", "BALANCED", "POSTED 10", 10, False), ("BTN", "LOOSE", "WAITING", 0, False)), hero_stack=650, hero_position="UTG"),
+        _benchmark("PF AKs open caller", "AKs versus open and caller, short", "preflop", ("AS", "KS"), (), 75, 30,
+                   (("MP", "BALANCED", "RAISED TO 30", 30, False), ("CO", "LOOSE", "CALLED 30", 30, False), ("BB", "TIGHT", "POSTED 10", 10, False)), hero_stack=120),
+        _benchmark("PF AQs single open", "AQs versus late open", "preflop", ("AH", "QH"), (), 55, 30,
+                   (("CO", "AGGRESSIVE", "RAISED TO 30", 30, False), ("SB", "TIGHT", "POSTED 5", 5, False), ("BB", "LOOSE", "POSTED 10", 10, False))),
+        _benchmark("PF AJs single open", "AJs versus tight early open", "preflop", ("AH", "JH"), (), 55, 30,
+                   (("UTG", "TIGHT", "RAISED TO 30", 30, False), ("SB", "BALANCED", "POSTED 5", 5, False), ("BB", "LOOSE", "POSTED 10", 10, False))),
+        _benchmark("PF KQs open reraise", "KQs facing raise and re-raise", "preflop", ("KH", "QH"), (), 145, 90,
+                   (("MP", "TIGHT", "RAISED TO 30", 30, False), ("CO", "BALANCED", "RAISED TO 90", 90, False), ("BB", "LOOSE", "POSTED 10", 10, False)), last_full_raise=60),
+        _benchmark("PF 99 late unopened", "99 late position unopened", "preflop", ("9S", "9H"), (), 15, 10,
+                   (("SB", "LOOSE", "POSTED 5", 5, False), ("BB", "BALANCED", "POSTED 10", 10, False), ("CO", "TIGHT", "FOLDED", 0, True))),
+        _benchmark("PF 76s late unopened", "76s late position unopened", "preflop", ("7S", "6S"), (), 15, 10,
+                   (("SB", "TIGHT", "POSTED 5", 5, False), ("BB", "BALANCED", "POSTED 10", 10, False), ("CO", "LOOSE", "FOLDED", 0, True))),
+        _benchmark("PF 72o early", "weak offsuit early position", "preflop", ("7C", "2D"), (), 15, 10,
+                   (("SB", "TIGHT", "POSTED 5", 5, False), ("BB", "BALANCED", "POSTED 10", 10, False), ("BTN", "LOOSE", "WAITING", 0, False)), hero_position="UTG"),
+    )
+    postflop_specs = (
+        ("POST top pair strong", "top pair strong kicker", "flop", ("AH", "KH"), ("AD", "7C", "2S")),
+        ("POST top pair weak", "top pair weak kicker", "flop", ("AH", "4H"), ("AD", "KC", "8S")),
+        ("POST middle pair", "middle pair", "flop", ("9H", "8H"), ("KD", "9C", "3S")),
+        ("POST overpair", "overpair", "flop", ("QH", "QS"), ("10D", "7C", "2S")),
+        ("POST two pair", "two pair", "turn", ("KH", "7H"), ("KD", "7C", "2S", "4D")),
+        ("POST set", "set", "turn", ("8H", "8S"), ("8D", "KC", "3S", "2H")),
+        ("POST flush draw", "flush draw", "flop", ("AH", "5H"), ("KH", "8H", "2C")),
+        ("POST open ended", "open-ended straight draw", "flop", ("9C", "8D"), ("7H", "6S", "KC")),
+        ("POST combo draw", "combo draw", "flop", ("9H", "8H"), ("7H", "6C", "2H")),
+        ("POST missed river", "missed river hand", "river", ("QH", "JH"), ("9D", "5S", "2H", "3C", "7D")),
+        ("POST bluff catcher", "bluff catcher", "river", ("JH", "10H"), ("JC", "8D", "5S", "3C", "2D")),
+        ("POST near nut", "near-nut hand", "river", ("AH", "KH"), ("QH", "JH", "10H", "2C", "3D")),
+    )
+    postflop = tuple(
+        _benchmark(name, purpose, street, hero, board, 120 if street == "flop" else 220, 0,
+                   (("CO", "BALANCED", "CHECKED", 0, False), ("SB", "TIGHT", "FOLDED", 0, True), ("BB", "LOOSE", "FOLDED", 0, True)))
+        for name, purpose, street, hero, board in postflop_specs
+    )
+    return preflop + postflop
+
+
 def _benchmark(
     name: str,
     purpose: str,
@@ -272,17 +355,18 @@ def _benchmark(
     current_bet: int,
     opponent_specs: tuple[tuple[str, str, str, int, bool], ...],
     last_full_raise: int = 10,
+    hero_stack: int = 300,
+    hero_position: str = "BTN",
 ) -> PokerBenchmark:
-    hero_stack = 300
     opponents = tuple(
         OpponentState(
             position=position,
-            stack=300 - contribution,
+            stack=hero_stack - contribution,
             profile=profile,
             contribution=contribution,
             folded=folded,
             status=status,
-            stack_before_action=300,
+            stack_before_action=hero_stack,
         )
         for position, profile, status, contribution, folded in opponent_specs
     )
@@ -295,7 +379,7 @@ def _benchmark(
         street=street,
         hero_cards=(card(hero_codes[0]), card(hero_codes[1])),
         board=tuple(card(code) for code in board_codes),
-        hero_position="BTN",
+        hero_position=hero_position,
         hero_stack=hero_stack,
         hero_contribution=0,
         starting_pot=pot - sum(opponent.contribution for opponent in opponents),
@@ -312,6 +396,8 @@ def _benchmark(
 
 def _status_action(status: str) -> str:
     upper = status.upper()
+    if "POSTED" in upper:
+        return "post"
     if "RAISED" in upper:
         return "raise"
     if "BET" in upper:
@@ -534,6 +620,7 @@ def print_aggressive_trace(option: ActionOption) -> None:
     for response in trace.opponent_responses:
         print(
             f"{response.position} {response.profile} {response.prior_status}: "
+            f"call_cost={response.call_cost}, pot_odds={response.pot_odds:.2%}, "
             f"fold={response.fold_probability:.2%}, "
             f"prior strength={response.prior_mean_strength:.3f}, "
             f"calling strength={response.calling_mean_strength:.3f}"
@@ -546,8 +633,99 @@ def print_aggressive_trace(option: ActionOption) -> None:
             f"equity={equity:<7} final_pot={branch.final_pot:<4} "
             f"branch_ev={branch.branch_ev:+8.2f} weighted={branch.weighted_ev:+8.2f}"
         )
+        if branch.called_equity is None:
+            print(f"  formula: {branch.probability:.6f} * pot {branch.final_pot} = {branch.weighted_ev:+.2f}")
+        else:
+            print(
+                f"  formula: {branch.probability:.6f} * "
+                f"({branch.called_equity:.6f} * {branch.final_pot} * {trace.realization:.2f} "
+                f"- {trace.hero_cost}) = {branch.weighted_ev:+.2f}"
+            )
     print(f"TOTAL EV: {option.ev:+.2f} +/- {1.96 * option.standard_error:.2f} (95% MC)")
     print("=" * 80)
+
+
+def evaluate_benchmarks(
+    benchmarks: tuple[PokerBenchmark, ...],
+    equity_simulations: int = 2_000,
+    branch_simulations: int = 400,
+    seed: int = 4_100,
+) -> list[dict]:
+    rows = []
+    for index, benchmark in enumerate(benchmarks):
+        ranges = PokerRangeModel()
+        equity = PokerEquityEstimator(ranges, equity_simulations, seed + index).estimate(benchmark.scenario)
+        evaluation = PokerEVModel(ranges, branch_simulations, seed + 1_000 + index).evaluate(
+            benchmark.scenario, equity
+        )
+        rows.append({"name": benchmark.name, "purpose": benchmark.purpose, "scenario": benchmark.scenario,
+                     "ranges": ranges, "equity": equity, "evaluation": evaluation})
+    return rows
+
+
+def print_benchmark_results(rows: list[dict]) -> None:
+    print("\n" + "=" * 100)
+    print("RECOGNIZABLE HAND SANITY REVIEW")
+    print("=" * 100)
+    for row in rows:
+        evaluation = row["evaluation"]
+        evs = ", ".join(f"{option.key}={option.ev:+.1f}" for option in evaluation.options)
+        print(
+            f"{row['name']:<25} equity={row['equity'].equity:6.1%} "
+            f"best={evaluation.best_key:<13} sensitive={evaluation.model_sensitive} | {evs}"
+        )
+
+
+def print_scenario_explanation(row: dict) -> None:
+    """Print enough state and arithmetic to answer why an action won."""
+    scenario = row["scenario"]
+    equity = row["equity"]
+    evaluation = row["evaluation"]
+    ranges = row.get("ranges") or PokerRangeModel()
+    print("\n" + "#" * 100)
+    print(f"WHY THIS ACTION: {row.get('name', scenario.archetype)}")
+    print("#" * 100)
+    print(f"Hero: {' '.join(card_code(value) for value in scenario.hero_cards)}")
+    print(f"Board: {' '.join(card_code(value) for value in scenario.board) or '(none)'}")
+    print(
+        f"Street={scenario.street.upper()} position={scenario.hero_position} pot={scenario.pot} "
+        f"hero_stack={scenario.hero_stack} effective_stack={scenario.effective_stack} SPR={scenario.spr:.2f}"
+    )
+    print("Opponents:")
+    for opponent in scenario.opponents:
+        print(
+            f"  {opponent.position}: profile={opponent.profile} stack={opponent.stack} "
+            f"contribution={opponent.contribution} status={opponent.status} folded={opponent.folded}"
+        )
+    print("Action history:")
+    for action in scenario.action_history:
+        print(f"  {action.describe()}")
+    print("Modeled active ranges (top prior combos by normalized weight):")
+    for opponent in scenario.active_opponents:
+        weighted = ranges.weighted_combos(scenario, opponent)
+        total = sum(weight for _combo, weight in weighted)
+        strongest = sorted(weighted, key=lambda item: item[1], reverse=True)[:12]
+        text = ", ".join(
+            f"{card_code(combo[0])}{card_code(combo[1])}:{weight / total:.2%}"
+            for combo, weight in strongest
+        )
+        print(f"  {opponent.position} ({len(weighted)} combos): {text}")
+    print(
+        f"Hero raw equity={equity.equity:.2%} "
+        f"(win={equity.win_probability:.2%}, tie={equity.tie_probability:.2%}, "
+        f"95% CI={equity.confidence_interval_95[0]:.2%}-{equity.confidence_interval_95[1]:.2%})"
+    )
+    print(f"Legal actions: {', '.join(scenario.legal_actions)}")
+    print(f"Bet candidates: {scenario.candidate_bet_sizes}; player-facing: {scenario.player_candidate_bet_sizes}")
+    print(f"Raise candidates: {scenario.candidate_raise_sizes}; player-facing: {scenario.player_candidate_raise_sizes}")
+    for option in evaluation.options:
+        print(f"\nOPTION {option.key}: EV={option.ev:+.3f} +/- {1.96 * option.standard_error:.3f}")
+        if option.aggressive_trace is not None:
+            print_aggressive_trace(option)
+    print(
+        f"RESULT: {evaluation.best_key}; near={evaluation.near_equivalent_keys}; "
+        f"sensitivity winners={evaluation.sensitivity_best_keys}; model_sensitive={evaluation.model_sensitive}"
+    )
 
 
 def fold_probability_matrix() -> tuple[dict, ...]:

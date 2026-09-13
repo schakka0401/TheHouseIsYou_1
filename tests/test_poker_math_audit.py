@@ -8,6 +8,7 @@ from game.poker_audit import (
     benchmark_scenarios,
     card,
     exact_single_opponent_equity,
+    recognizable_sanity_benchmarks,
     reference_five,
     reference_equity,
 )
@@ -15,7 +16,7 @@ from game.poker_equity import PokerEquityEstimator
 from game.poker_ev import PokerEVModel, REALIZATION_BY_STREET
 from game.poker_hand_evaluator import evaluate_five
 from game.poker_models import ActionOption, EquityResult
-from game.poker_ranges import PokerRangeModel
+from game.poker_ranges import PokerRangeModel, starting_hand_strength
 
 
 class PokerBenchmarkAuditTests(unittest.TestCase):
@@ -27,6 +28,21 @@ class PokerBenchmarkAuditTests(unittest.TestCase):
         self.assertEqual(sum(item.name.startswith("T") for item in benchmarks), 3)
         self.assertEqual(sum(item.name.startswith("R") for item in benchmarks), 3)
         self.assertEqual(sum(item.name.startswith("M") for item in benchmarks), 1)
+
+    def test_recognizable_sanity_suite_covers_preflop_and_postflop_categories(self) -> None:
+        benchmarks = recognizable_sanity_benchmarks()
+        self.assertEqual(len(benchmarks), 22)
+        names = " ".join(item.name.lower() for item in benchmarks)
+        for label in ("aa", "ajs", "76s", "top pair", "middle pair", "overpair", "two pair",
+                      "set", "flush draw", "open ended", "combo draw", "missed river", "near nut"):
+            self.assertIn(label, names)
+
+    def test_posted_blind_is_conditioned_like_an_unacted_preflop_player(self) -> None:
+        combo = (card("7S"), card("6S"))
+        posted = PokerRangeModel.preflop_weight(combo, "BALANCED", "BB", "POSTED 10")
+        waiting = PokerRangeModel.preflop_weight(combo, "BALANCED", "BB", "WAITING")
+        self.assertEqual(posted, waiting)
+        self.assertGreater(starting_hand_strength(combo), 0.0)
 
     def test_independent_reference_hand_ranker_matches_known_categories(self) -> None:
         hands = (
@@ -90,6 +106,36 @@ class PokerBenchmarkAuditTests(unittest.TestCase):
         large = ranges.conditional_calling_range(scenario, opponent, 300)
         self.assertGreater(large.fold_probability, small.fold_probability)
         self.assertGreater(large.calling_mean_strength, small.calling_mean_strength)
+
+    def test_five_pressure_steps_fold_more_and_continue_stronger(self) -> None:
+        scenario = benchmark_scenarios()[4].scenario
+        opponent = scenario.active_opponents[0]
+        ranges = PokerRangeModel()
+        conditioned = [
+            ranges.conditional_calling_range(scenario, opponent, size)
+            for size in (45, 68, 90, 135, 300)
+        ]
+        folds = [item.fold_probability for item in conditioned]
+        strengths = [item.calling_mean_strength for item in conditioned]
+        self.assertEqual(folds, sorted(folds))
+        self.assertEqual(strengths, sorted(strengths))
+
+    def test_deep_stack_shove_remains_backend_only_but_low_spr_shove_is_visible(self) -> None:
+        deep = benchmark_scenarios()[2].scenario
+        self.assertIn(deep.effective_stack, deep.candidate_bet_sizes)
+        self.assertNotIn(deep.effective_stack, deep.player_candidate_bet_sizes)
+        shallow = replace(deep, hero_stack=120)
+        self.assertLessEqual(shallow.spr, 2.0)
+        self.assertIn(shallow.effective_stack, shallow.player_candidate_bet_sizes)
+
+    def test_enormous_raw_shove_winner_is_flagged_for_review(self) -> None:
+        scenario = recognizable_sanity_benchmarks()[0].scenario
+        ranges = PokerRangeModel()
+        equity = PokerEquityEstimator(ranges, 400, 77).estimate(scenario)
+        evaluation = PokerEVModel(ranges, 100, 78).evaluate(scenario, equity)
+        if evaluation.best_key == "all_in":
+            self.assertTrue(evaluation.oversized_shove_review)
+            self.assertTrue(evaluation.model_sensitive)
 
     def test_river_raise_conditions_a_stronger_range_than_river_bet(self) -> None:
         scenario = benchmark_scenarios()[8].scenario

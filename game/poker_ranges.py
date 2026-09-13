@@ -93,7 +93,7 @@ class PokerRangeModel:
             threshold += 0.08 - config["aggression"] * 0.08
         elif "CALLED" in status_upper:
             threshold -= 0.04
-        elif "CHECKED" in status_upper or status_upper == "WAITING":
+        elif "CHECKED" in status_upper or "POSTED" in status_upper or status_upper == "WAITING":
             threshold -= 0.08
         margin = strength - threshold
         if margin < -0.20:
@@ -260,10 +260,11 @@ def _continue_threshold(
 ) -> float:
     """Required 0-1 range strength for a neutral 50% continuation chance."""
     if scenario.street == "preflop":
-        threshold = 0.55 + 0.45 * pot_odds + 0.08 * stack_fraction
+        threshold = 0.50 + 0.35 * pot_odds + 0.05 * stack_fraction
+        threshold += 0.075 * math.log1p(pressure)
     else:
-        threshold = 0.30 + 0.55 * pot_odds + 0.10 * stack_fraction
-    threshold += 0.055 * math.log1p(min(8.0, pressure))
+        threshold = 0.22 + 0.45 * pot_odds + 0.06 * stack_fraction
+        threshold += 0.055 * math.log1p(min(8.0, pressure))
     threshold += {"TIGHT": 0.045, "BALANCED": 0.0, "LOOSE": -0.050, "AGGRESSIVE": -0.035}[opponent.profile]
     status = opponent.status.upper()
     if "RAISED" in status:
@@ -272,7 +273,7 @@ def _continue_threshold(
         threshold -= 0.065
     elif "CALLED" in status:
         threshold -= 0.040
-    elif "CHECKED" in status or status == "WAITING":
+    elif "CHECKED" in status or "POSTED" in status or status == "WAITING":
         threshold += 0.025
     if scenario.street == "river":
         threshold += 0.025
@@ -339,7 +340,9 @@ def range_continue_strength(combo: tuple[Card, Card], board: tuple[Card, ...]) -
             pair_adjustment = 0.13 if pair_rank > max(board_values) else -0.01 * board_overcards
         else:
             pair_adjustment = max(-0.025, 0.10 - 0.045 * board_overcards)
-        kicker_component += pair_adjustment
+        best_kicker = score[2] if len(score) > 2 else 2
+        kicker_quality = max(0.0, min(1.0, (best_kicker - 2) / 12.0))
+        kicker_component = 0.02 + 0.10 * kicker_quality + pair_adjustment
     category = postflop_category(combo, board)
     if category == "strong_draw":
         return max(0.54, min(0.68, category_base + kicker_component + 0.34))

@@ -7,7 +7,7 @@ import pygame
 from game.menu import AnimatedImageButton, MainMenu, MenuButton, PRESS_MS, SettingsMenu, serif_font
 from game.blackjack_game import BlackjackGame
 from game.poker_game import PokerGame
-from game.player_state import PlayerState
+from game.player_state import PlayerState, ensure_playable_bankroll
 from game.audio import AudioManager, FOOTSTEP_INTERVAL_MS
 
 
@@ -16,9 +16,9 @@ CARD_SIZE = (150, 210)
 PLAYER_SIZE = (96, 96)
 PLAYER_COLLISION_SIZE = (32, 32)
 PLAYER_DISPLAY_SIZE = (72, 96)
-SLOT_PLAYER_DISPLAY_SIZE = (54, 72)
-DEALER_DISPLAY_SIZE = (54, 72)
-BARTENDER_DISPLAY_SIZE = (54, 81)
+SLOT_PLAYER_DISPLAY_SIZE = (46, 72)
+DEALER_DISPLAY_SIZE = (46, 72)
+BARTENDER_DISPLAY_SIZE = (46, 81)
 STOOL_DISPLAY_SIZE = (42, 59)
 BEER_DISPLAY_SIZE = (18, 23)
 CUP_DISPLAY_SIZE = (16, 22)
@@ -36,8 +36,14 @@ STOOL_IMAGE = ASSETS / "stool.png"
 BEER_IMAGE = ASSETS / "beer.png"
 CUP_IMAGE = ASSETS / "cup.png"
 DEALER_IMAGE = ASSETS / "dealer.png"
+BLACKJACK_DEALER_IMAGE = ASSETS / "blackjack.png"
 BARTENDER_PORTRAIT_IMAGE = ASSETS / "bartender_portrait.png"
 BARTENDER_BACKGROUND_IMAGE = ASSETS / "bartender_background.png"
+POKER_BACKGROUND_IMAGE = ASSETS / "poker_background.png"
+BLACKJACK_BACKGROUND_IMAGE = ASSETS / "blackjack_background.png"
+# The supplied files use historical names: bartender_portrait is the casino
+# room backdrop, while the *_background files are the framed dealer artwork.
+NPC_DIALOGUE_SCENE_IMAGE = BARTENDER_PORTRAIT_IMAGE
 POKER_TABLE_IMAGE = ASSETS / "poker_table_clean.png"
 BLACKJACK_TABLE_IMAGE = ASSETS / "blackjack_table_clean.png"
 CHARACTER_SHEET = ASSETS / "2D Top Down Pixel Art Characters" / "000.png"
@@ -46,8 +52,27 @@ SLOT_MACHINE_SHEET = CASINO_DIRECTORY / "Animated Sprite Sheets" / "SlotMachines
 SLOT_PLAYER_IMAGE = ASSETS / "slot_player.png"
 SLOT_PLAYER_RIGHT_IMAGE = ASSETS / "slot_player_right.png"
 BARTENDER_INTERACTION_DISTANCE = 125
+DEALER_INTERACTION_DISTANCE = 350
 TABLE = pygame.Rect(465, 250, 350, 220)
 DEBUG_MENU_HITBOXES = False
+
+NPC_DIALOGUES = {
+    "bartender": {
+        "text": "Hello there! Check out our games or come get a beer!",
+        "background": NPC_DIALOGUE_SCENE_IMAGE,
+        "character": BARTENDER_BACKGROUND_IMAGE,
+    },
+    "poker": {
+        "text": "Looking for a seat? Sit down. Let's see how well you read the table.",
+        "background": NPC_DIALOGUE_SCENE_IMAGE,
+        "character": POKER_BACKGROUND_IMAGE,
+    },
+    "blackjack": {
+        "text": "Care to test your judgment? Take a seat. Let's see if you know when to hit and when to stand.",
+        "background": NPC_DIALOGUE_SCENE_IMAGE,
+        "character": BLACKJACK_BACKGROUND_IMAGE,
+    },
+}
 
 def find_image_asset(stem: str) -> Path:
     matches = sorted(IMAGE_DIRECTORY.glob(f"{stem}.*"))
@@ -69,13 +94,42 @@ def load_ui_assets() -> tuple[pygame.Surface, pygame.Surface, pygame.Surface]:
     return home_button, options_menu, settings_menu
 
 
-def load_bartender_dialogue_assets() -> tuple[pygame.Surface, pygame.Surface]:
-    background = pygame.image.load(BARTENDER_PORTRAIT_IMAGE).convert()
-    portrait = pygame.image.load(BARTENDER_BACKGROUND_IMAGE).convert()
-    return (
-        pygame.transform.smoothscale(background, WINDOW_SIZE),
-        pygame.transform.smoothscale(portrait, (390, 390)),
-    )
+def scale_dialogue_character(image: pygame.Surface) -> pygame.Surface:
+    """Fit a framed dealer illustration into the dialogue foreground slot."""
+    max_width, max_height = 390, 390
+    scale = min(max_width / image.get_width(), max_height / image.get_height())
+    size = (max(1, round(image.get_width() * scale)), max(1, round(image.get_height() * scale)))
+    return pygame.transform.smoothscale(image, size)
+
+
+def load_npc_dialogue_assets() -> tuple[dict[str, pygame.Surface], dict[str, pygame.Surface]]:
+    """Load the shared casino backdrop and each NPC's foreground artwork once."""
+    backgrounds: dict[str, pygame.Surface] = {}
+    characters: dict[str, pygame.Surface] = {}
+    for npc, data in NPC_DIALOGUES.items():
+        scene = pygame.image.load(data["background"]).convert()
+        character = pygame.image.load(data["character"]).convert()
+        backgrounds[npc] = scale_dialogue_background(scene)
+        characters[npc] = scale_dialogue_character(character)
+    return backgrounds, characters
+
+
+def scale_dialogue_background(image: pygame.Surface) -> pygame.Surface:
+    """Scale a dialogue background to cover the window without distortion."""
+    scale = max(WINDOW_SIZE[0] / image.get_width(), WINDOW_SIZE[1] / image.get_height())
+    size = (max(1, round(image.get_width() * scale)), max(1, round(image.get_height() * scale)))
+    scaled = pygame.transform.smoothscale(image, size)
+    result = pygame.Surface(WINDOW_SIZE)
+    result.blit(scaled, scaled.get_rect(center=result.get_rect().center))
+    return result
+
+
+def load_npc_dialogue_backgrounds() -> dict[str, pygame.Surface]:
+    backgrounds = {}
+    for npc, data in NPC_DIALOGUES.items():
+        image = pygame.image.load(data["background"]).convert()
+        backgrounds[npc] = scale_dialogue_background(image)
+    return backgrounds
 
 
 def scaled_options_menu(image: pygame.Surface, screen_size: tuple[int, int]) -> pygame.Surface:
@@ -145,7 +199,6 @@ SLOT_MACHINE_CENTERS = (
     pygame.Vector2(1050, 100),
     pygame.Vector2(1200, 100),
 )
-TABLE_INTERACTION_DISTANCE = 190
 SLOT_MACHINE_INTERACTION_DISTANCE = 120
 BEVERAGE_POSITIONS = ((585, 255), (640, 245), (695, 255))
 STOOL_POSITIONS = (
@@ -162,7 +215,7 @@ STOOL_POSITIONS = (
 
 
 def load_player_animations() -> dict[str, list[pygame.Surface]]:
-    """Load the two right-facing frames and cache their left-facing flips."""
+    """Load all facing animations and cache only the existing left mirroring."""
     right_frames: list[pygame.Surface] = []
     for frame_index in range(2):
         path = PLAYER_SPRITE_DIRECTORY / f"player_right{frame_index}.png"
@@ -171,8 +224,71 @@ def load_player_animations() -> dict[str, list[pygame.Surface]]:
         image = pygame.image.load(path).convert_alpha()
         right_frames.append(pygame.transform.scale(image, PLAYER_DISPLAY_SIZE))
 
+    def load_vertical_frames(direction: str) -> list[pygame.Surface]:
+        source_frames: dict[int, pygame.Surface] = {}
+        for frame_index in range(3):
+            path = PLAYER_SPRITE_DIRECTORY / f"player_{direction}{frame_index}.png"
+            if not path.exists():
+                raise FileNotFoundError(f"Missing player sprite: {path}")
+            image = pygame.image.load(path).convert_alpha()
+            source_frames[frame_index] = pygame.transform.smoothscale(image, PLAYER_DISPLAY_SIZE)
+
+        # The middle frame is the idle pose. Repeating it creates the
+        # requested alternating gait without mirroring vertical artwork.
+        return [
+            source_frames[0],
+            source_frames[1],
+            source_frames[0],
+            source_frames[2],
+            source_frames[0],
+        ]
+
     left_frames = [pygame.transform.flip(frame, True, False) for frame in right_frames]
-    return {"right": right_frames, "left": left_frames}
+    return {
+        "right": right_frames,
+        "left": left_frames,
+        "up": load_vertical_frames("up"),
+        "down": load_vertical_frames("down"),
+    }
+
+
+def update_player_facing(facing: str, movement: pygame.Vector2) -> str:
+    """Keep the current facing axis sticky while a diagonal is added.
+
+    The movement vector is already reduced for opposite keys, so a cancelled
+    axis naturally hands facing to the remaining perpendicular axis. A
+    change to the opposite direction on the current axis is treated as an
+    intentional turn.
+    """
+    if movement.length_squared() == 0:
+        return facing
+
+    dx, dy = movement.x, movement.y
+    if facing == "up":
+        if dy < 0:
+            return "up"
+        if dy > 0:
+            return "down"
+        return "left" if dx < 0 else "right"
+    if facing == "down":
+        if dy > 0:
+            return "down"
+        if dy < 0:
+            return "up"
+        return "left" if dx < 0 else "right"
+    if facing == "left":
+        if dx < 0:
+            return "left"
+        if dx > 0:
+            return "right"
+        return "up" if dy < 0 else "down"
+
+    # Default and right-facing behavior.
+    if dx > 0:
+        return "right"
+    if dx < 0:
+        return "left"
+    return "up" if dy < 0 else "down"
 
 
 def load_cards() -> list[tuple[str, pygame.Surface]]:
@@ -221,8 +337,8 @@ def load_stool() -> pygame.Surface:
     return pygame.transform.scale(cropped, STOOL_DISPLAY_SIZE)
 
 
-def load_dealer() -> pygame.Surface:
-    image = pygame.image.load(DEALER_IMAGE).convert()
+def load_dealer(image_path: Path = DEALER_IMAGE) -> pygame.Surface:
+    image = pygame.image.load(image_path).convert()
     image.set_colorkey((0, 0, 0))
     cropped = image.subsurface((197, 191, 630, 1142)).copy()
     cropped.set_colorkey((0, 0, 0))
@@ -328,6 +444,7 @@ def load_casino_scenes() -> tuple[
     pygame.Surface,
     pygame.Surface,
     pygame.Surface,
+    pygame.Surface,
 ]:
     """Load the room, tables, bartender, and drinks from the casino tileset."""
     tileset = pygame.image.load(CASINO_TILESET).convert_alpha()
@@ -351,6 +468,7 @@ def load_casino_scenes() -> tuple[
         load_beer(),
         load_cup(),
         load_dealer(),
+        load_dealer(BLACKJACK_DEALER_IMAGE),
     )
 
 
@@ -372,8 +490,18 @@ def draw_room(
     beer: pygame.Surface,
     cup: pygame.Surface,
     dealer: pygame.Surface,
+    blackjack_dealer: pygame.Surface,
 ) -> None:
     screen.blit(background, (0, 0))
+
+    def draw_player() -> None:
+        screen.blit(image, image.get_rect(center=player))
+
+    def player_is_behind(table: pygame.Surface, center: pygame.Vector2) -> bool:
+        table_rect = table.get_rect(center=center)
+        return table_rect.left <= player.x <= table_rect.right and player.y < table_rect.centery
+
+    player_drawn = False
     slot_machine = slot_machine_frames[slot_machine_frame]
     for center in SLOT_MACHINE_CENTERS:
         screen.blit(slot_machine, slot_machine.get_rect(center=center))
@@ -385,18 +513,11 @@ def draw_room(
         slot_player_right,
         slot_player_right.get_rect(midbottom=(SLOT_MACHINE_CENTERS[4].x - 18, 170)),
     )
-    nearby_tables = [
-        (player.distance_to(CARD_TABLE_CENTER), tables[0], CARD_TABLE_CENTER, "play poker"),
-        (player.distance_to(BLACKJACK_TABLE_CENTER), tables[2], BLACKJACK_TABLE_CENTER, "play blackjack"),
-    ]
-    nearby_tables = [item for item in nearby_tables if item[0] < TABLE_INTERACTION_DISTANCE]
-    for _, table, center, _ in nearby_tables:
-        glow = pygame.Surface(WINDOW_SIZE, pygame.SRCALPHA)
-        glow_rect = table.get_rect(center=center).inflate(18, 18)
-        pygame.draw.ellipse(glow, (246, 211, 74, 130), glow_rect, width=8)
-        screen.blit(glow, (0, 0))
     dealer_position = (CARD_TABLE_CENTER.x, CARD_TABLE_CENTER.y - 90)
     screen.blit(dealer, dealer.get_rect(midbottom=dealer_position))
+    if player_is_behind(tables[0], CARD_TABLE_CENTER):
+        draw_player()
+        player_drawn = True
     screen.blit(tables[0], tables[0].get_rect(center=CARD_TABLE_CENTER))
     screen.blit(bartender, bartender.get_rect(midbottom=(CENTER_TABLE_CENTER.x, CENTER_TABLE_CENTER.y + 20)))
     screen.blit(tables[1], tables[1].get_rect(center=CENTER_TABLE_CENTER))
@@ -404,56 +525,88 @@ def draw_room(
         beverage = beer if index == 1 else cup
         screen.blit(beverage, beverage.get_rect(center=position))
     dealer_position = (BLACKJACK_TABLE_CENTER.x, BLACKJACK_TABLE_CENTER.y - 80)
-    screen.blit(dealer, dealer.get_rect(midbottom=dealer_position))
+    screen.blit(blackjack_dealer, blackjack_dealer.get_rect(midbottom=dealer_position))
+    if player_is_behind(tables[2], BLACKJACK_TABLE_CENTER):
+        draw_player()
+        player_drawn = True
     screen.blit(tables[2], tables[2].get_rect(center=BLACKJACK_TABLE_CENTER))
     for position in STOOL_POSITIONS:
         screen.blit(stool, stool.get_rect(center=position))
-    screen.blit(image, image.get_rect(center=player))
+    if not player_drawn:
+        draw_player()
     nearby_interactions = [
-        (distance, action)
-        for distance, _, _, action in nearby_tables
+        (player.distance_to(center), "interact")
+        for center in (CENTER_TABLE_CENTER, CARD_TABLE_CENTER, BLACKJACK_TABLE_CENTER)
+        if player.distance_to(center) < BARTENDER_INTERACTION_DISTANCE
     ]
-    bartender_distance = player.distance_to(CENTER_TABLE_CENTER)
-    if bartender_distance < BARTENDER_INTERACTION_DISTANCE:
-        nearby_interactions.append((bartender_distance, "interact"))
     if nearby_interactions:
         _, action = min(nearby_interactions, key=lambda item: item[0])
         prompt = serif_font(30, True).render(f"Press E to {action}", True, "#f7e9b9")
         screen.blit(prompt, prompt.get_rect(center=(WINDOW_SIZE[0] // 2, 610)))
 
 
-def draw_bartender_dialogue(
+def wrap_dialogue_text(text: str, font: pygame.font.Font, max_width: int) -> list[str]:
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if current and font.size(candidate)[0] > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def draw_npc_dialogue(
     screen: pygame.Surface,
     background: pygame.Surface,
-    portrait: pygame.Surface,
-    page: int,
+    text: str,
+    portrait: pygame.Surface | None = None,
+    choices: list[MenuButton] | None = None,
 ) -> None:
     screen.blit(background, (0, 0))
     overlay = pygame.Surface(WINDOW_SIZE, pygame.SRCALPHA)
     overlay.fill((0, 0, 0, 105))
     screen.blit(overlay, (0, 0))
-    portrait_rect = portrait.get_rect(bottomright=(WINDOW_SIZE[0], WINDOW_SIZE[1]))
-    screen.blit(portrait, portrait_rect)
+    if portrait is not None:
+        portrait_rect = portrait.get_rect(bottomright=(WINDOW_SIZE[0], WINDOW_SIZE[1]))
+        screen.blit(portrait, portrait_rect)
 
-    dialogue_box = pygame.Surface((890, 170), pygame.SRCALPHA)
+    dialogue_box_height = 200 if choices else 170
+    dialogue_box = pygame.Surface((890, dialogue_box_height), pygame.SRCALPHA)
     dialogue_box.fill((0, 0, 0, 190))
     pygame.draw.rect(dialogue_box, "#d29a32", dialogue_box.get_rect(), width=2, border_radius=10)
-    screen.blit(dialogue_box, (0, 550))
+    dialogue_box_rect = dialogue_box.get_rect(bottomleft=(0, WINDOW_SIZE[1]))
+    screen.blit(dialogue_box, dialogue_box_rect)
     text_font = serif_font(28, True)
-    message_lines = (
-        ("Hey, nice to meet you.",)
-        if page == 0
-        else (
-            "We have blackjack and poker for you to try out.",
-            "Have fun and enjoy!",
-        )
-    )
+    message_lines = wrap_dialogue_text(text, text_font, 820)
     for line_index, line in enumerate(message_lines):
         message = text_font.render(line, True, "#f7e9b9")
-        screen.blit(message, (30, 580 + line_index * 38))
-    hint_text = "CLICK / ENTER: next     ESC: return to the casino floor" if page == 0 else "ESC: return to the casino floor"
-    hint = serif_font(20).render(hint_text, True, "#d8d0b8")
-    screen.blit(hint, (30, 685))
+        screen.blit(message, (30, dialogue_box_rect.top + 30 + line_index * 34))
+    if choices:
+        for button in choices:
+            button.draw(screen, pygame.time.get_ticks())
+        # The two labeled buttons are self-explanatory; keep the lower edge
+        # of the dialogue panel clear of extra text.
+    else:
+        hint_text = "CLICK / ENTER / ESC: return to the casino floor"
+        hint = serif_font(20).render(hint_text, True, "#d8d0b8")
+        screen.blit(hint, (30, WINDOW_SIZE[1] - 35))
+
+
+def make_dialogue_choice_buttons() -> list[MenuButton]:
+    face = serif_font(23, True)
+    buttons = []
+    for label, center_x in (("PLAY", 275), ("LEAVE", 515)):
+        rect = pygame.Rect(0, 0, 170, 38)
+        rect.center = (center_x, 665)
+        buttons.append(MenuButton(label, 0, face, rect))
+    buttons[0].selected = True
+    return buttons
 
 
 def draw_card_game(
@@ -520,9 +673,10 @@ def main() -> None:
             beer,
             cup,
             dealer,
+            blackjack_dealer,
         ) = load_casino_scenes()
         home_button_image, options_menu_image, settings_menu_image = load_ui_assets()
-        bartender_dialogue_background, bartender_portrait = load_bartender_dialogue_assets()
+        dialogue_backgrounds, dialogue_characters = load_npc_dialogue_assets()
     except FileNotFoundError as error:
         pygame.quit()
         raise SystemExit(error) from error
@@ -566,7 +720,8 @@ def main() -> None:
     slot_machine_frame = 0
     slot_machine_timer = 0.0
     show_tutorial = True
-    bartender_dialogue_page = 0
+    active_dialogue_npc: str | None = None
+    dialogue_choice_buttons: list[MenuButton] = []
     running = True
 
     def open_game_options() -> None:
@@ -581,6 +736,46 @@ def main() -> None:
     def close_game_menu() -> None:
         nonlocal game_menu_open
         game_menu_open = False
+
+    def close_npc_dialogue() -> None:
+        nonlocal mode, active_dialogue_npc, dialogue_choice_buttons
+        mode = "room"
+        active_dialogue_npc = None
+        dialogue_choice_buttons = []
+
+    def open_npc_dialogue(npc: str) -> None:
+        nonlocal mode, active_dialogue_npc, dialogue_choice_buttons
+        if npc not in NPC_DIALOGUES or mode != "room":
+            return
+        audio.stop_footsteps()
+        active_dialogue_npc = npc
+        dialogue_choice_buttons = make_dialogue_choice_buttons() if npc in {"poker", "blackjack"} else []
+        audio.play_interaction(npc)
+        mode = "dialogue"
+
+    def start_table_game(npc: str) -> None:
+        nonlocal mode, poker_game, blackjack_game, show_tutorial
+        if npc not in {"poker", "blackjack"}:
+            close_npc_dialogue()
+            return
+        close_npc_dialogue()
+        ensure_playable_bankroll(player_state)
+        if npc == "poker":
+            poker_game = PokerGame(screen, player_state, menu_audio=menu.audio)
+            mode = "poker"
+        else:
+            show_tutorial = False
+            blackjack_game = BlackjackGame(screen, player_state, menu_audio=menu.audio)
+            mode = "blackjack"
+
+    def activate_dialogue_choice(index: int) -> None:
+        if active_dialogue_npc not in {"poker", "blackjack"}:
+            close_npc_dialogue()
+            return
+        if index == 0:
+            start_table_game(active_dialogue_npc)
+        else:
+            close_npc_dialogue()
 
     def activate_option(index: int, now: int) -> None:
         nonlocal mode, was_moving
@@ -648,13 +843,55 @@ def main() -> None:
                 if action == "room":
                     mode = "room"
                 continue
-            if mode == "bartender":
+            if mode == "dialogue":
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    mode = "room"
+                    close_npc_dialogue()
+                elif event.type == pygame.KEYDOWN and event.key in (pygame.K_UP, pygame.K_w, pygame.K_DOWN, pygame.K_s):
+                    if dialogue_choice_buttons:
+                        direction = -1 if event.key in (pygame.K_UP, pygame.K_w) else 1
+                        current = next(
+                            (i for i, button in enumerate(dialogue_choice_buttons) if button.selected),
+                            0,
+                        )
+                        selected = (current + direction) % len(dialogue_choice_buttons)
+                        for i, button in enumerate(dialogue_choice_buttons):
+                            button.selected = i == selected
+                        menu.audio.switch()
                 elif event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                    bartender_dialogue_page = min(1, bartender_dialogue_page + 1)
+                    if dialogue_choice_buttons:
+                        selected = next(
+                            (i for i, button in enumerate(dialogue_choice_buttons) if button.selected),
+                            0,
+                        )
+                        activate_dialogue_choice(selected)
+                    else:
+                        close_npc_dialogue()
+                elif event.type == pygame.MOUSEMOTION:
+                    if dialogue_choice_buttons:
+                        hovered = next(
+                            (i for i, button in enumerate(dialogue_choice_buttons) if button.contains(event.pos)),
+                            None,
+                        )
+                        if hovered is not None:
+                            current = next(
+                                (i for i, button in enumerate(dialogue_choice_buttons) if button.selected),
+                                0,
+                            )
+                            if hovered != current:
+                                for i, button in enumerate(dialogue_choice_buttons):
+                                    button.selected = i == hovered
+                                menu.audio.switch()
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    bartender_dialogue_page = min(1, bartender_dialogue_page + 1)
+                    clicked = next(
+                        (i for i, button in enumerate(dialogue_choice_buttons) if button.contains(event.pos)),
+                        None,
+                    )
+                    if clicked is not None:
+                        dialogue_choice_buttons[clicked].press(now)
+                        menu.audio.click()
+                        activate_dialogue_choice(clicked)
+                    elif not dialogue_choice_buttons:
+                        close_npc_dialogue()
                 continue
             if mode == "slots":
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
@@ -682,8 +919,8 @@ def main() -> None:
                 elif mode == "room" and event.key == pygame.K_e:
                     interactions = (
                         (player.distance_to(CENTER_TABLE_CENTER), BARTENDER_INTERACTION_DISTANCE, "bartender"),
-                        (player.distance_to(CARD_TABLE_CENTER), TABLE_INTERACTION_DISTANCE, "poker"),
-                        (player.distance_to(BLACKJACK_TABLE_CENTER), TABLE_INTERACTION_DISTANCE, "blackjack"),
+                        (player.distance_to(CARD_TABLE_CENTER), DEALER_INTERACTION_DISTANCE, "poker"),
+                        (player.distance_to(BLACKJACK_TABLE_CENTER), DEALER_INTERACTION_DISTANCE, "blackjack"),
                         *(
                             (player.distance_to(center), SLOT_MACHINE_INTERACTION_DISTANCE, "slots")
                             for center in SLOT_MACHINE_CENTERS
@@ -695,19 +932,8 @@ def main() -> None:
                     if not available_interactions:
                         continue
                     nearest = min(available_interactions, key=lambda item: item[0])
-                    if nearest[2] == "poker":
-                        audio.stop_footsteps()
-                        poker_game = PokerGame(screen, player_state, menu_audio=menu.audio)
-                        mode = "poker"
-                    elif nearest[2] == "bartender":
-                        audio.stop_footsteps()
-                        bartender_dialogue_page = 0
-                        mode = "bartender"
-                    elif nearest[2] == "blackjack":
-                        audio.stop_footsteps()
-                        show_tutorial = False
-                        blackjack_game = BlackjackGame(screen, player_state, menu_audio=menu.audio)
-                        mode = "blackjack"
+                    if nearest[2] in NPC_DIALOGUES:
+                        open_npc_dialogue(nearest[2])
                     elif nearest[2] == "slots":
                         audio.stop_footsteps()
                         mode = "slots"
@@ -747,12 +973,14 @@ def main() -> None:
         elif mode == "poker" and poker_game is not None:
             poker_game.update()
             poker_game.draw()
-        elif mode == "bartender":
-            draw_bartender_dialogue(
+        elif mode == "dialogue" and active_dialogue_npc is not None:
+            dialogue = NPC_DIALOGUES[active_dialogue_npc]
+            draw_npc_dialogue(
                 screen,
-                bartender_dialogue_background,
-                bartender_portrait,
-                bartender_dialogue_page,
+                dialogue_backgrounds[active_dialogue_npc],
+                dialogue["text"],
+                dialogue_characters[active_dialogue_npc],
+                dialogue_choice_buttons,
             )
         elif mode == "slots":
             draw_slot_machine_game(screen, slot_machine_frames[slot_machine_frame], title_font, font)
@@ -763,37 +991,36 @@ def main() -> None:
             # The room remains visible beneath the pause panel, but no gameplay
             # input, interaction, animation, or footsteps run while paused.
             keys = pygame.key.get_pressed() if not game_menu_open and pending_home_open_at is None else None
-            movement = pygame.Vector2(0, 0) if keys is None else pygame.Vector2(
+            movement_input = pygame.Vector2(0, 0) if keys is None else pygame.Vector2(
                 (keys[pygame.K_RIGHT] or keys[pygame.K_d]) - (keys[pygame.K_LEFT] or keys[pygame.K_a]),
                 (keys[pygame.K_DOWN] or keys[pygame.K_s]) - (keys[pygame.K_UP] or keys[pygame.K_w])
             )
-            walking_input = movement.length_squared() > 0
+            walking_input = movement_input.length_squared() > 0
             old_position = player.copy()
             if walking_input:
-                movement = movement.normalize()
-                move_player(player, movement, delta_time, collision_rects)
-                player.x = max(PLAYER_SIZE[0] // 2, min(WINDOW_SIZE[0] - PLAYER_SIZE[0] // 2, player.x))
-                player.y = max(130, min(WINDOW_SIZE[1] - PLAYER_SIZE[1] // 2, player.y))
-                if movement.x > 0:
-                    next_facing = "right"
-                elif movement.x < 0:
-                    next_facing = "left"
-                else:
-                    next_facing = facing
+                next_facing = update_player_facing(facing, movement_input)
                 if next_facing != facing:
                     facing = next_facing
                     animation_frame = 0
                     animation_timer = 0.0
-                animation_timer += delta_time
-                while animation_timer >= PLAYER_ANIMATION_FRAME_DURATION:
-                    animation_timer -= PLAYER_ANIMATION_FRAME_DURATION
-                    animation_frame = (animation_frame + 1) % 2
+
+                # Normalize once so diagonal movement uses the same total
+                # speed as cardinal movement.
+                movement = movement_input.normalize()
+                move_player(player, movement, delta_time, collision_rects)
+                player.x = max(PLAYER_SIZE[0] // 2, min(WINDOW_SIZE[0] - PLAYER_SIZE[0] // 2, player.x))
+                player.y = max(130, min(WINDOW_SIZE[1] - PLAYER_SIZE[1] // 2, player.y))
             else:
                 animation_frame = 0
                 animation_timer = 0.0
 
             actual_movement = player.distance_to(old_position) > 0.01
             if actual_movement:
+                animation_timer += delta_time
+                animation_frame_count = len(player_animations[facing])
+                while animation_timer >= PLAYER_ANIMATION_FRAME_DURATION:
+                    animation_timer -= PLAYER_ANIMATION_FRAME_DURATION
+                    animation_frame = (animation_frame + 1) % animation_frame_count
                 if not was_moving:
                     # Make the first step audible immediately, then return to
                     # the normal timed rhythm.
@@ -831,6 +1058,7 @@ def main() -> None:
                 beer,
                 cup,
                 dealer,
+                blackjack_dealer,
             )
 
             screen_width, screen_height = screen.get_size()
