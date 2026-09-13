@@ -63,6 +63,8 @@ class BlackjackGame:
         self.screen = screen
         self.player_state = player_state
         self.menu_audio = menu_audio
+        background_path = Path(__file__).resolve().with_name("back.png")
+        self.background_image = pygame.image.load(background_path).convert()
         self.random = random.Random(seed)
         audio_manager = getattr(menu_audio, "manager", None)
         self.dealer_voice = DealerVoiceManager(audio_manager) if audio_manager is not None else None
@@ -681,11 +683,8 @@ class BlackjackGame:
             chip = pygame.transform.smoothscale(image, base.size)
             self.screen.blit(chip, base.move(0, -index * 2))
 
-#####################
-
     def draw(self) -> None:
-        image = pygame.image.load("back.png")
-        self.screen.blit(image, (0,0))
+        self.screen.blit(self.background_image, (0, 0))
 
         if self.phase == "analyzing":
             self.screen.blit(self.title_font.render("ANALYZING YOUR DECISIONS...", True, "#f7e9b9"), (35, 25))
