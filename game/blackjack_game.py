@@ -720,7 +720,7 @@ class BlackjackGame:
             self.screen.blit(comment, comment.get_rect(center=(panel.centerx, 605)))
             prompt = self.small_font.render("ENTER: next independent scenario", True, "#d8d0b8")
             self.screen.blit(prompt, prompt.get_rect(center=(panel.centerx, 640)))
-        self._text("ESC: return to casino floor", (35, 680), 22, "#d8d0b8")
+        self._text("ESC: return to casino floor", (35, 680), 28, "#d8d0b8")
 
     def _draw_results(self) -> None:
         self._ensure_results_layout()
