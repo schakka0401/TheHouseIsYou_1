@@ -698,7 +698,7 @@ class BlackjackGame:
             self._draw_results()
             return
 
-        self.screen.blit(self.title_font.render("BLACKJACK DECISION TABLE", True, "#f7e9b9"), (35, 25))
+        self.screen.blit(self.title_font.render("BLACKJACK DECISION TABLE", True, "#f7e9b9"), (400, 25))
         self._text(f"Round {self.round_number}/{BLACKJACK_ROUNDS}", (1010, 35))
         self._text(f"Shared bankroll: {self.player_state.chips} chips", (35, 80))
         self._draw_hands()
