@@ -681,8 +681,12 @@ class BlackjackGame:
             chip = pygame.transform.smoothscale(image, base.size)
             self.screen.blit(chip, base.move(0, -index * 2))
 
+#####################
+
     def draw(self) -> None:
-        self.screen.fill("#154734")
+        image = pygame.image.load("back.png")
+        self.screen.blit(image, (0,0))
+
         if self.phase == "analyzing":
             self.screen.blit(self.title_font.render("ANALYZING YOUR DECISIONS...", True, "#f7e9b9"), (35, 25))
             completed, total = self.analysis_completed, max(1, self.analysis_total)
