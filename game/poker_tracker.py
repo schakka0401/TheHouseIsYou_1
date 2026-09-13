@@ -25,7 +25,11 @@ class PokerSessionTracker:
         chosen_ev = option.ev
         best_ev = prepared.evaluation.best_ev
         exact_preferred = option.key == prepared.evaluation.best_key
-        acceptable_action = option.key in prepared.evaluation.near_equivalent_keys
+        sensitivity_winners = set(prepared.evaluation.sensitivity_best_keys)
+        acceptable_action = (
+            option.key in prepared.evaluation.near_equivalent_keys
+            or option.key in sensitivity_winners
+        )
         action_family_preferred = action == prepared.evaluation.best_action
         same_action = [candidate for candidate in prepared.evaluation.options if candidate.action == action]
         same_action_best = max(same_action, key=lambda candidate: candidate.ev)
@@ -37,12 +41,16 @@ class PokerSessionTracker:
             PokerEVModel._near_equal(same_action_best, option, prepared.scenario.pot)
             if action in {"bet", "raise"} and same_action else True
         )
-        if exact_preferred:
-            classification = "MODEL-PREFERRED"
+        competing_near_equal = any(
+            key != prepared.evaluation.best_key
+            for key in prepared.evaluation.near_equivalent_keys
+        )
+        if acceptable_action and (prepared.evaluation.model_sensitive or competing_near_equal):
+            classification = "CLOSE / MODEL-SENSITIVE"
         elif acceptable_action:
-            classification = "NEAR-EQUIVALENT"
+            classification = "REASONABLE"
         else:
-            classification = "CLEARLY SUBOPTIMAL"
+            classification = "CLEAR MISTAKE"
         final_action = PokerAction("YOU", action, option.amount or 0)
         record = PokerDecisionRecord(
             round_number=round_number,
@@ -75,6 +83,8 @@ class PokerSessionTracker:
         count = len(self.records)
         exact_preferred = sum(record.exact_preferred for record in self.records)
         reasonable = sum(record.acceptable_action for record in self.records)
+        close_decisions = sum(record.decision_classification == "CLOSE / MODEL-SENSITIVE" for record in self.records)
+        clear_mistakes = sum(record.decision_classification == "CLEAR MISTAKE" for record in self.records)
         preferred_families = sum(record.action_family_preferred for record in self.records)
         accuracy = reasonable / count
         average_confidence = mean(record.confidence_probability for record in self.records)
@@ -114,23 +124,45 @@ class PokerSessionTracker:
                 for record in poor_sizes
             )
             wording = (
-                "Your aggressive actions were often larger than the model preferred."
+                "Your bet and raise sizes tended to risk more than the model preferred."
                 if too_large > len(poor_sizes) / 2
-                else "Your bet or raise sizes tended to leave value on the table."
+                else "Your stronger decisions often used sizes that left value on the table."
             )
             observations.append(wording)
+        elif sized:
+            observations.append("Your bet and raise sizes were generally within the model's preferred range.")
         elif aggressive - preferred_aggressive >= 0.20:
-            observations.append("This session suggests you applied pressure more often than the model considered worthwhile.")
+            observations.append("You applied pressure more often than the model considered worthwhile.")
         elif preferred_aggressive - aggressive >= 0.20:
-            observations.append("This session suggests you passed on aggressive actions more often than the model preferred.")
+            observations.append("You passed on aggressive actions more often than the model preferred.")
         elif value_left_on_table <= max(5.0, sum(record.scenario.pot for record in self.records) * 0.03):
-            observations.append("The modeled value difference between your choices and the preferred choices was small.")
+            observations.append("Your decisions were generally reasonable, with only small differences from the model's preferred lines.")
+
+        if not observations and reasonable >= count * 0.6:
+            observations.append("Your decisions were generally reasonable, with only small differences from the model's preferred lines.")
+
+        high_confidence_clear = [
+            record for record in self.records
+            if record.confidence_percent >= 80 and record.decision_classification == "CLEAR MISTAKE"
+        ]
+        if len(high_confidence_clear) >= 2:
+            confidence_insight = "Your confidence stayed high even when several decisions lost meaningful value."
+        elif len(high_confidence_clear) == 1:
+            confidence_insight = "You were highly confident on one decision where the model strongly preferred another action."
+        elif accuracy >= 0.8 and average_confidence <= 0.55:
+            confidence_insight = "Your decisions were stronger than your confidence suggested."
+        elif accuracy >= 0.8 and average_confidence <= 0.65:
+            confidence_insight = "You seemed to recognize when you were uncertain."
+        else:
+            confidence_insight = None
 
         return {
             "rounds": count,
             # Player-facing count includes statistically/practically near-equivalent choices.
             "preferred_action_count": reasonable,
             "reasonable_decision_count": reasonable,
+            "close_decision_count": close_decisions,
+            "clear_mistake_count": clear_mistakes,
             "exact_preferred_count": exact_preferred,
             "preferred_action_family_count": preferred_families,
             "action_family_accuracy": preferred_families / count,
@@ -148,6 +180,7 @@ class PokerSessionTracker:
             "average_sizing_regret": mean(sized) if sized else 0.0,
             "action_frequencies": action_frequencies,
             "observations": observations[:2],
+            "confidence_insight": confidence_insight,
         }
 
     @staticmethod

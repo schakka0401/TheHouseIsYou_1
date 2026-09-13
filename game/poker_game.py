@@ -3,15 +3,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import random
 import threading
 
 import pygame
 
+from game.menu import MenuButton, PRESS_MS as MENU_PRESS_MS, serif_font
+from game.dealer_voice import HIGH, LOW
 from game.player_state import PlayerState
 from game.poker_models import Card, PokerDecisionRecord, PokerScenario, PreparedPokerRound, card_code
 from game.poker_scenarios import EQUITY_SIMULATIONS, POKER_ROUNDS, PokerScenarioGenerator
+from game.poker_dealer import PokerDealerOverlay
 from game.poker_tracker import PokerSessionTracker
-from game.menu import serif_font
 
 
 CONFIDENCE_TRACK = pygame.Rect(80, 560, 400, 14)
@@ -23,6 +26,9 @@ CHIP_DISPLAY_SIZE = (36, 36)
 CHIP_TRAY_ORIGIN = (565, 575)
 CHIP_TRAY_STEP = (70, 52)
 WAGER_FIELD = pygame.Rect(800, 585, 170, 42)
+DEBUG_POKER_RESULTS_LAYOUT = False
+# Temporary console aid for testing a perfect Poker session. Keep off for normal play.
+DEBUG_PRINT_POKER_BEST_MOVES = True
 
 
 @dataclass(frozen=True)
@@ -116,6 +122,10 @@ class PokerGame:
         self.screen = screen
         self.player_state = player_state
         self.menu_audio = menu_audio
+        self.voice_session_number = 1
+        self.voice_random = random.Random(seed)
+        audio_manager = getattr(menu_audio, "manager", None)
+        self.poker_dealer = PokerDealerOverlay(screen, audio_manager, seed=seed)
         self.generator = PokerScenarioGenerator(seed=seed, equity_simulations=equity_simulations)
         self.tracker = PokerSessionTracker()
         self.round_number = 0
@@ -123,6 +133,17 @@ class PokerGame:
         self.prepared: PreparedPokerRound | None = None
         self.record: PokerDecisionRecord | None = None
         self.summary: dict | None = None
+        results_path = Path(__file__).resolve().parents[1] / "static" / "assets" / "images" / "results_paper.png"
+        self.results_paper_source = pygame.image.load(results_path).convert_alpha()
+        self.results_paper_surface: pygame.Surface | None = None
+        self.results_paper_rect = pygame.Rect(0, 0, 0, 0)
+        self.results_safe_rect = pygame.Rect(0, 0, 0, 0)
+        self.result_draw_items: list[tuple[pygame.Surface, pygame.Rect]] = []
+        self.result_element_rects: list[pygame.Rect] = []
+        self.rematch_button: MenuButton | None = None
+        self.results_layout_screen_size: tuple[int, int] | None = None
+        self.results_last_mouse_pos = pygame.mouse.get_pos()
+        self.pending_rematch_at: int | None = None
         self.confidence_percent: int | None = None
         self.selected_action: str | None = None
         self.selected_amount: int | None = None
@@ -141,6 +162,7 @@ class PokerGame:
         self.title_font = serif_font(44, True)
         self.font = serif_font(26)
         self.small_font = serif_font(20)
+        self.button_face = serif_font(24, True)
         self._load_card_images()
         self._load_chip_images()
         self.on_poker_session_start()
@@ -194,6 +216,27 @@ class PokerGame:
         loading_thread.start()
 
     def update(self) -> None:
+        self.poker_dealer.update()
+        if (
+            self.phase == "summary"
+            and self.pending_rematch_at is not None
+            and pygame.time.get_ticks() >= self.pending_rematch_at
+        ):
+            self.pending_rematch_at = None
+            self.tracker = PokerSessionTracker()
+            self.round_number = 0
+            self.summary = None
+            self.prepared = None
+            self.record = None
+            self.rematch_button = None
+            self.results_layout_screen_size = None
+            self.voice_session_number += 1
+            self.voice_random.seed(self.voice_session_number)
+            self.poker_dealer.reset()
+            self.on_poker_session_start()
+            self._start_round_loading()
+            return
+
         if self.phase != "loading" or self.loading_thread is None or self.loading_thread.is_alive():
             return
         if self.loading_error is not None:
@@ -211,10 +254,21 @@ class PokerGame:
         self.record = None
         self.phase = "decision"
         self._layout_controls()
+        if DEBUG_PRINT_POKER_BEST_MOVES:
+            self._print_model_preferred_move()
         self.on_poker_round_start(self.round_number)
+
+    def _print_model_preferred_move(self) -> None:
+        assert self.prepared is not None
+        evaluation = self.prepared.evaluation
+        move = evaluation.best_action.upper()
+        if evaluation.best_amount is not None:
+            move += f" TO {evaluation.best_amount}"
+        print(f"[POKER TEST] ROUND {self.round_number}/{POKER_ROUNDS} BEST MOVE: {move}")
 
     def handle_event(self, event: pygame.event.Event) -> str | None:
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            self.poker_dealer.reset()
             return "room"
         if self.phase == "loading":
             return None
@@ -223,12 +277,38 @@ class PokerGame:
                 self._start_round_loading()
             return None
         if self.phase == "summary":
+            self._ensure_results_layout()
+            now = pygame.time.get_ticks()
+            if event.type == pygame.VIDEORESIZE:
+                self._invalidate_results_layout()
+                return None
+            if event.type == pygame.MOUSEMOTION:
+                self.results_last_mouse_pos = event.pos
+                if self.rematch_button is not None:
+                    was_selected = self.rematch_button.selected
+                    self.rematch_button.selected = self.rematch_button.contains(event.pos)
+                    if self.rematch_button.selected and not was_selected and self.menu_audio:
+                        self.menu_audio.switch()
+                return None
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if (
+                    self.rematch_button is not None
+                    and self.rematch_button.contains(event.pos)
+                    and self.pending_rematch_at is None
+                ):
+                    self.rematch_button.selected = True
+                    self.rematch_button.press(now)
+                    if self.menu_audio:
+                        self.menu_audio.click()
+                    self.pending_rematch_at = now + MENU_PRESS_MS
+                return None
             if event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                self.tracker = PokerSessionTracker()
-                self.round_number = 0
-                self.summary = None
-                self.on_poker_session_start()
-                self._start_round_loading()
+                if self.pending_rematch_at is None and self.rematch_button is not None:
+                    self.rematch_button.selected = True
+                    self.rematch_button.press(now)
+                    if self.menu_audio:
+                        self.menu_audio.click()
+                    self.pending_rematch_at = now + MENU_PRESS_MS
             return None
         if self.phase != "decision" or self.prepared is None:
             return None
@@ -316,7 +396,11 @@ class PokerGame:
             return
         if action != self.selected_action:
             self.selected_amount = None
-            self.selected_chips.clear()
+            # Keep the action-selection helper usable by lightweight test
+            # fixtures that construct a PokerGame without the chip widgets.
+            selected_chips = getattr(self, "selected_chips", None)
+            if selected_chips is not None:
+                selected_chips.clear()
         self.selected_action = action
         if action not in {"bet", "raise"}:
             self.selected_amount = None
@@ -557,9 +641,9 @@ class PokerGame:
         if self.prepared is None:
             return ()
         if self.selected_action == "bet":
-            return self.prepared.scenario.candidate_bet_sizes
+            return self.prepared.scenario.player_candidate_bet_sizes
         if self.selected_action == "raise":
-            return self.prepared.scenario.candidate_raise_sizes
+            return self.prepared.scenario.player_candidate_raise_sizes
         return ()
 
     def _draw_selected_chips(self) -> None:
@@ -592,37 +676,211 @@ class PokerGame:
         prompt = "ENTER: session report" if self.round_number == POKER_ROUNDS else "ENTER: next independent scenario"
         self._text(prompt, (485, 620), 20, "#f1d277")
 
-    def _draw_summary(self) -> None:
+    def _invalidate_results_layout(self) -> None:
+        self.results_layout_screen_size = None
+
+    @staticmethod
+    def _wrap_result_text(text: str, font: pygame.font.Font, max_width: int) -> list[str]:
+        words = str(text).split()
+        if not words:
+            return []
+        lines: list[str] = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            if font.size(candidate)[0] <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
+
+    def _build_results_layout(
+        self,
+        *,
+        body_reduction: int,
+        gap_scale: float,
+        observation_count: int,
+        show_confidence: bool,
+    ):
+        """Create result surfaces from the final displayed paper rect only."""
+        paper_rect = self.results_paper_rect
+        safe_rect = self.results_safe_rect
+        ph = paper_rect.height
+        cx = safe_rect.centerx
         summary = self.summary or {}
-        self._text("THE HOUSE SAYS", (495, 38), 40, "#f7e9b9")
-        self._text(
-            f"MODEL-PREFERRED DECISIONS  {summary.get('preferred_action_count', 0)} / {summary.get('rounds', 0)}",
-            (345, 105),
-            29,
-            "#f1d277",
+
+        title_font = serif_font(max(16, int(ph * 0.040)))
+        score_label_font = serif_font(max(12, int(ph * 0.027)))
+        score_value_font = serif_font(max(25, int(ph * 0.060)))
+        section_font = serif_font(max(11, int(ph * 0.025) - body_reduction))
+        body_font = serif_font(max(10, int(ph * 0.020) - body_reduction))
+        small_font = serif_font(max(9, int(ph * 0.016) - body_reduction))
+        heading_color = (86, 20, 30)
+        body_color = (45, 27, 22)
+        score_color = (112, 24, 28)
+        line_gap = max(1, int(ph * 0.004 * gap_scale))
+        section_gap = max(4, int(ph * 0.012 * gap_scale))
+        block_gap = max(6, int(ph * 0.018 * gap_scale))
+
+        button_height = max(28, int(ph * 0.052))
+        # Leave room for MenuButton's hover/press expansion and ornaments.
+        button_width = min(int(safe_rect.width * 0.78), safe_rect.width)
+        button_bottom = min(
+            safe_rect.bottom - max(2, int(ph * 0.008)),
+            paper_rect.top + int(ph * 0.84),
         )
-        self._text("CONFIDENCE", (360, 165), 24, "#f1d277")
-        self._text(f"Average confidence: {summary.get('average_confidence', 0):.0%}", (360, 197), 24)
-        self._text(f"Decision accuracy: {summary.get('action_accuracy', 0):.0%}", (360, 227), 24)
-        gap = summary.get("calibration_gap", 0.0)
-        if abs(gap) < 0.005:
-            calibration = "Confidence matched decision accuracy in these five spots."
-        elif gap > 0:
-            calibration = f"Confidence ran {abs(gap):.0%} ahead of decision accuracy."
-        else:
-            calibration = f"Confidence ran {abs(gap):.0%} behind decision accuracy."
-        self._text(calibration, (360, 257), 22, "#d8d0b8")
+        button_rect = pygame.Rect(0, 0, button_width, button_height)
+        button_rect.midbottom = (cx, button_bottom)
+        content_bottom = button_rect.top - max(5, int(ph * 0.018))
 
-        self._text("EXPECTED VALUE", (360, 310), 24, "#f1d277")
-        self._text(f"Your choices: ${summary.get('chosen_total_ev', 0):+.1f}", (360, 342), 24)
-        self._text(f"Model-preferred choices: ${summary.get('best_total_ev', 0):+.1f}", (360, 372), 24)
-        self._text(f"Value left on the table: ${summary.get('value_left_on_table', 0):.1f}", (360, 402), 24)
+        items: list[tuple[pygame.Surface, pygame.Rect]] = []
+        element_rects: list[pygame.Rect] = []
+        cursor_y = safe_rect.top
 
-        self._text("WHAT THE HOUSE NOTICED", (360, 455), 24, "#f1d277")
-        for index, observation in enumerate(summary.get("observations", [])):
-            self._text(observation, (285, 490 + index * 32), 20, "#d8d0b8")
-        self._text("Five decisions are a small sample. This is model feedback, not GTO truth.", (300, 610), 21, "#f1d277")
-        self._text("ENTER: new five-round session     ESC: casino floor", (390, 665), 20, "#d8d0b8")
+        def add_block(
+            text: str,
+            font: pygame.font.Font,
+            color=body_color,
+            gap_after: int = block_gap,
+            max_lines: int | None = None,
+        ) -> None:
+            nonlocal cursor_y
+            lines: list[str] = []
+            for paragraph in str(text).split("\n"):
+                lines.extend(self._wrap_result_text(paragraph, font, int(safe_rect.width * 0.92)))
+            if max_lines is not None:
+                lines = lines[:max_lines]
+            if not lines:
+                cursor_y += gap_after
+                return
+            for line in lines:
+                surface = font.render(line, True, color)
+                rect = surface.get_rect(midtop=(cx, cursor_y))
+                items.append((surface, rect))
+                element_rects.append(rect)
+                cursor_y = rect.bottom + line_gap
+            cursor_y += gap_after
+
+        add_block("THE HOUSE SAYS", title_font, heading_color, gap_after=section_gap)
+        add_block("DECISION QUALITY", section_font, heading_color, gap_after=section_gap)
+        reasonable = int(summary.get("reasonable_decision_count", summary.get("preferred_action_count", 0)))
+        rounds = int(summary.get("rounds", POKER_ROUNDS))
+        close = int(summary.get("close_decision_count", 0))
+        # Only show a clear-mistake count when the tracker explicitly classified it.
+        # Inferring it as rounds minus reasonable would mislabel close decisions.
+        clear = int(summary.get("clear_mistake_count", 0))
+        add_block(f"{reasonable} / {rounds} reasonable decisions", body_font, gap_after=line_gap)
+        if close:
+            noun = "decision" if close == 1 else "decisions"
+            add_block(f"{close} close {noun}", body_font, gap_after=line_gap)
+        if clear:
+            noun = "mistake" if clear == 1 else "mistakes"
+            add_block(f"{clear} clear {noun}", body_font, gap_after=block_gap)
+
+        observations = list(summary.get("observations", []))[:observation_count]
+        if not observations:
+            observations = [
+                "Your decisions were generally reasonable, with only small differences from the model's preferred lines."
+            ]
+        add_block("WHAT THE HOUSE NOTICED", section_font, heading_color, gap_after=section_gap)
+        for observation in observations:
+            add_block(observation, body_font, gap_after=section_gap, max_lines=3)
+
+        confidence_insight = summary.get("confidence_insight")
+        if show_confidence and confidence_insight:
+            add_block("CONFIDENCE CHECK", section_font, heading_color, gap_after=section_gap)
+            add_block(confidence_insight, body_font, gap_after=block_gap, max_lines=3)
+
+        add_block(
+            "Five decisions are a small sample.\nThis is model-based feedback, not GTO truth.",
+            small_font,
+            body_color,
+            gap_after=0,
+            max_lines=2,
+        )
+
+        if cursor_y > content_bottom:
+            return None
+
+        element_rects.append(button_rect)
+        if any(previous.bottom >= current.top for previous, current in zip(element_rects, element_rects[1:])):
+            return None
+        if any(not safe_rect.contains(rect) for rect in element_rects):
+            return None
+        button_visual_rect = button_rect.inflate(
+            max(2, int(button_rect.width * 0.10)),
+            max(2, int(button_rect.height * 0.10)),
+        )
+        if not safe_rect.contains(button_visual_rect):
+            return None
+        return items, element_rects, button_rect
+
+    def _ensure_results_layout(self) -> None:
+        screen_size = self.screen.get_size()
+        if self.results_layout_screen_size == screen_size and self.rematch_button is not None:
+            return
+
+        source = self.results_paper_source
+        max_width = max(1, int(self.screen.get_width() * 0.86))
+        max_height = max(1, int(self.screen.get_height() * 0.94))
+        scale = min(max_width / source.get_width(), max_height / source.get_height())
+        paper_size = (
+            max(1, int(source.get_width() * scale)),
+            max(1, int(source.get_height() * scale)),
+        )
+        self.results_paper_surface = pygame.transform.smoothscale(source, paper_size)
+        self.results_paper_rect = self.results_paper_surface.get_rect(center=self.screen.get_rect().center)
+        px, py = self.results_paper_rect.topleft
+        pw, ph = self.results_paper_rect.size
+        self.results_safe_rect = pygame.Rect(
+            px + int(pw * 0.13),
+            py + int(ph * 0.13),
+            int(pw * 0.74),
+            int(ph * 0.73),
+        )
+
+        layout = None
+        for reduction, gap_scale, observation_count, show_confidence in (
+            (0, 1.0, 2, True),
+            (1, 0.85, 2, True),
+            (2, 0.70, 2, True),
+            (2, 0.60, 1, True),
+            (3, 0.50, 1, False),
+            (4, 0.40, 1, False),
+        ):
+            layout = self._build_results_layout(
+                body_reduction=reduction,
+                gap_scale=gap_scale,
+                observation_count=observation_count,
+                show_confidence=show_confidence,
+            )
+            if layout is not None:
+                break
+        if layout is None:
+            raise AssertionError("Poker results content does not fit inside the paper safe area")
+
+        self.result_draw_items, self.result_element_rects, button_rect = layout
+        button_face = serif_font(max(13, min(24, int(self.results_paper_rect.height * 0.026))), True)
+        self.rematch_button = MenuButton("CARE TO PROVE ME WRONG?", 0, button_face, button_rect)
+        self.rematch_button.selected = self.rematch_button.contains(self.results_last_mouse_pos)
+        self.results_layout_screen_size = screen_size
+
+    def _draw_summary(self) -> None:
+        self._ensure_results_layout()
+        self.screen.fill((7, 3, 4))
+        self.screen.blit(self.results_paper_surface, self.results_paper_rect)
+        for surface, rect in self.result_draw_items:
+            self.screen.blit(surface, rect)
+        self.rematch_button.draw(self.screen, pygame.time.get_ticks())
+
+        # Raw EV instrumentation stays in the console/debug report.
+        if DEBUG_POKER_RESULTS_LAYOUT:
+            pygame.draw.rect(self.screen, (0, 255, 0), self.results_paper_rect, 2)
+            pygame.draw.rect(self.screen, (0, 180, 255), self.results_safe_rect, 2)
+            for rect in self.result_element_rects:
+                pygame.draw.rect(self.screen, (255, 255, 0), rect, 1)
 
     def _draw_card(self, card: Card, position: tuple[int, int]) -> None:
         image = self.card_images.get(card)
@@ -670,15 +928,49 @@ class PokerGame:
     def _text(self, text: str, position: tuple[int, int], size: int, color: str = "#ffffff") -> None:
         self.screen.blit(serif_font(size).render(text, True, color), position)
 
-    # Deliberately empty integration hooks for a later local Poker voice system.
     def on_poker_session_start(self) -> None:
-        pass
+        if not hasattr(self, "poker_dealer"):
+            return
+        context = self._voice_context("entry")
+        self.poker_dealer.clear_context(context, include_high=True, stop_current=True)
+        self.poker_dealer.play_line("poker_intro", HIGH, context=context)
 
     def on_poker_round_start(self, round_index: int) -> None:
-        pass
+        if not hasattr(self, "poker_dealer"):
+            return
+        context = self._voice_context(f"round:{round_index}")
+        self.poker_dealer.clear_context(context)
+        if round_index == POKER_ROUNDS:
+            self.poker_dealer.play_line("poker_final_round", HIGH, context=context)
+            return
+        if self.voice_random.random() < 0.40:
+            self.poker_dealer.play_line(
+                self.voice_random.choice(("poker_round_1", "poker_round_2", "poker_round_3")),
+                LOW,
+                context=context,
+            )
 
     def on_poker_decision_locked(self, record: PokerDecisionRecord) -> None:
-        pass
+        if not hasattr(self, "poker_dealer") or not hasattr(self, "voice_random"):
+            return
+        if self.voice_random.random() >= 0.45:
+            return
+        context = self._voice_context(f"round:{record.round_number}")
+        if record.confidence_percent >= 80 and self.voice_random.random() < 0.55:
+            reaction = "poker_reaction_4"
+        else:
+            reaction = self.voice_random.choice(
+                ("poker_reaction_1", "poker_reaction_2", "poker_reaction_3")
+            )
+        self.poker_dealer.play_line(reaction, LOW, context=context)
 
     def on_poker_session_complete(self, summary: dict) -> None:
-        pass
+        if not hasattr(self, "poker_dealer"):
+            return
+        context = self._voice_context("results")
+        # Results supersede any stale round/final-round chatter.
+        self.poker_dealer.clear_context(context, include_high=True, stop_current=True)
+        self.poker_dealer.play_line("poker_results", HIGH, context=context)
+
+    def _voice_context(self, stage: str) -> str:
+        return f"poker:{self.voice_session_number}:{stage}"

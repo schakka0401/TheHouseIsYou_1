@@ -6,7 +6,7 @@ and a fully expanded aggressive-action trace.
 """
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from bisect import bisect_left
 from dataclasses import dataclass, replace
 from itertools import accumulate, combinations
@@ -16,12 +16,129 @@ import time
 
 from game.poker_equity import PokerEquityEstimator
 from game.poker_ev import PokerEVModel
+from game.poker_hand_evaluator import evaluate_holdem
 from game.poker_models import ActionOption, Card, OpponentState, PokerAction, PokerScenario, RANK_VALUE, poker_deck
 from game.poker_ranges import PokerRangeModel
+from game.poker_scenarios import PokerScenarioGenerator
 
 
 REFERENCE_EQUITY_SIMULATIONS = 30_000
 REFERENCE_EXACT_STATE_LIMIT = 100_000
+
+
+def distribution_scenarios(count: int = 240, seed: int = 913) -> tuple[PokerScenario, ...]:
+    """Return a repeatable, street-balanced sample through production builders."""
+    if count < 4:
+        raise ValueError("Distribution audit needs at least four scenarios")
+    generator = PokerScenarioGenerator(seed=seed, equity_simulations=20)
+    builders = (
+        generator._build_preflop,
+        generator._build_flop_made_hand,
+        generator._build_turn_draw,
+        generator._build_turn_marginal,
+        generator._build_river_bluff_catcher,
+    )
+    stacks = (120, 180, 260, 400, 650, 1000)
+    scenarios = []
+    for index in range(count):
+        builder = builders[index % len(builders)]
+        scenarios.append(builder(stacks[(index // len(builders)) % len(stacks)]))
+    return tuple(scenarios)
+
+
+def audit_preferred_distribution(
+    count: int = 240,
+    seed: int = 913,
+    equity_simulations: int = 400,
+    branch_simulations: int = 120,
+) -> dict:
+    """Measure preferred actions without imposing a target distribution."""
+    rows = []
+    for index, scenario in enumerate(distribution_scenarios(count, seed)):
+        ranges = PokerRangeModel()
+        equity = PokerEquityEstimator(ranges, equity_simulations, seed + index).estimate(scenario)
+        evaluation = PokerEVModel(
+            ranges, branch_simulations, seed + 10_000 + index, sensitivity=False
+        ).evaluate(
+            scenario, equity
+        )
+        aggressive = evaluation.best_action in {"bet", "raise"}
+        candidates = (
+            scenario.candidate_bet_sizes
+            if evaluation.best_action == "bet"
+            else scenario.candidate_raise_sizes
+            if evaluation.best_action == "raise"
+            else ()
+        )
+        largest = bool(aggressive and candidates and evaluation.best_amount == max(candidates))
+        all_in = evaluation.best_key == "all_in"
+        rows.append({
+            "scenario": scenario,
+            "equity": equity,
+            "evaluation": evaluation,
+            "largest": largest,
+            "all_in": all_in,
+            "category": _hero_category(scenario),
+        })
+
+    by_street = {}
+    for street in ("preflop", "flop", "turn", "river"):
+        street_rows = [row for row in rows if row["scenario"].street == street]
+        denominator = len(street_rows)
+        counts = Counter(row["evaluation"].best_action for row in street_rows)
+        by_street[street] = {
+            "count": denominator,
+            "actions": {action: counts[action] / denominator for action in ("fold", "call", "check", "bet", "raise")},
+            "largest": sum(row["largest"] for row in street_rows) / denominator,
+            "all_in": sum(row["all_in"] for row in street_rows) / denominator,
+        }
+
+    all_ins = [row for row in rows if row["all_in"]]
+    category_counts = Counter(row["category"] for row in all_ins)
+    return {
+        "count": len(rows),
+        "by_street": by_street,
+        "largest_frequency": sum(row["largest"] for row in rows) / len(rows),
+        "all_in_frequency": len(all_ins) / len(rows),
+        "all_in_average_effective_stack_to_pot": (
+            sum(row["scenario"].effective_stack / max(1, row["scenario"].pot) for row in all_ins) / len(all_ins)
+            if all_ins else 0.0
+        ),
+        "all_in_average_equity": (
+            sum(row["equity"].equity for row in all_ins) / len(all_ins) if all_ins else 0.0
+        ),
+        "all_in_categories": dict(category_counts),
+        "rows": rows,
+    }
+
+
+def print_preferred_distribution(summary: dict) -> None:
+    print("\n" + "=" * 96)
+    print(f"PREFERRED-ACTION DISTRIBUTION ({summary['count']} deterministic scenarios)")
+    print("=" * 96)
+    for street, data in summary["by_street"].items():
+        actions = "  ".join(
+            f"{action}={frequency:.1%}" for action, frequency in data["actions"].items() if frequency
+        )
+        print(
+            f"{street.upper():<8} n={data['count']:<3} {actions}  "
+            f"largest={data['largest']:.1%} all-in={data['all_in']:.1%}"
+        )
+    print(f"Largest sizing overall: {summary['largest_frequency']:.1%}")
+    print(f"All-in overall:         {summary['all_in_frequency']:.1%}")
+    print(f"All-in average SPR:     {summary['all_in_average_effective_stack_to_pot']:.2f}")
+    print(f"All-in average equity:  {summary['all_in_average_equity']:.1%}")
+    print(f"All-in hand categories: {summary['all_in_categories']}")
+
+
+def _hero_category(scenario: PokerScenario) -> str:
+    if scenario.street == "preflop":
+        ranks = [RANK_VALUE[rank] for rank, _suit in scenario.hero_cards]
+        if ranks[0] == ranks[1]:
+            return "pocket_pair"
+        return "suited" if scenario.hero_cards[0][1] == scenario.hero_cards[1][1] else "offsuit"
+    names = ("high_card", "one_pair", "two_pair", "trips", "straight", "flush", "full_house", "quads", "straight_flush")
+    return names[evaluate_holdem(scenario.hero_cards, scenario.board)[0]]
 
 
 @dataclass(frozen=True)
@@ -450,9 +567,8 @@ def fold_probability_matrix() -> tuple[dict, ...]:
                 model = PokerEVModel(PokerRangeModel(), branch_simulations=20, seed=3)
                 probabilities = []
                 for label, cost in (("small", 25), ("medium", 50), ("large", 100), ("all_in", 300)):
-                    baseline = model.fold_probability(opponent, scenario, cost)
                     conditioned = model.range_model.conditional_calling_range(
-                        scenario, opponent, cost, baseline
+                        scenario, opponent, cost
                     )
                     probabilities.append((label, conditioned.fold_probability))
                 rows.append({

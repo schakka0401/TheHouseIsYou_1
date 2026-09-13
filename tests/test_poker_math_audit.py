@@ -86,10 +86,8 @@ class PokerBenchmarkAuditTests(unittest.TestCase):
         opponent = scenario.active_opponents[0]
         ranges = PokerRangeModel()
         model = PokerEVModel(ranges, branch_simulations=20, seed=2)
-        small_base = model.fold_probability(opponent, scenario, 45)
-        large_base = model.fold_probability(opponent, scenario, 300)
-        small = ranges.conditional_calling_range(scenario, opponent, 45, small_base)
-        large = ranges.conditional_calling_range(scenario, opponent, 300, large_base)
+        small = ranges.conditional_calling_range(scenario, opponent, 45)
+        large = ranges.conditional_calling_range(scenario, opponent, 300)
         self.assertGreater(large.fold_probability, small.fold_probability)
         self.assertGreater(large.calling_mean_strength, small.calling_mean_strength)
 
@@ -98,9 +96,9 @@ class PokerBenchmarkAuditTests(unittest.TestCase):
         bettor = scenario.active_opponents[0]
         raiser = replace(bettor, status="RAISED TO 140")
         ranges = PokerRangeModel()
-        bet_range = ranges.conditional_calling_range(scenario, bettor, 100, 0.40)
+        bet_range = ranges.conditional_calling_range(scenario, bettor, 100)
         raised_scenario = replace(scenario, opponents=(raiser,) + scenario.opponents[1:])
-        raise_range = ranges.conditional_calling_range(raised_scenario, raiser, 100, 0.40)
+        raise_range = ranges.conditional_calling_range(raised_scenario, raiser, 100)
         self.assertGreater(raise_range.prior_mean_strength, bet_range.prior_mean_strength)
 
     def test_adding_active_opponents_reduces_showdown_equity(self) -> None:
@@ -122,8 +120,7 @@ class PokerBenchmarkAuditTests(unittest.TestCase):
             profiled = replace(scenario, opponents=(opponent,) + scenario.opponents[1:])
             ranges = PokerRangeModel()
             model = PokerEVModel(ranges, branch_simulations=20, seed=3)
-            baseline = model.fold_probability(opponent, profiled, 175)
-            calling = ranges.conditional_calling_range(profiled, opponent, 175, baseline)
+            calling = ranges.conditional_calling_range(profiled, opponent, 175)
             equities.append(exact_single_opponent_equity(profiled, calling.weighted_combos).equity)
         self.assertGreater(equities[0], equities[1])
         self.assertGreater(equities[1], equities[2])

@@ -59,12 +59,16 @@ class DealerVoiceManager:
         audio_manager,
         voice_directory: Path | None = None,
         *,
+        line_names: tuple[str, ...] | None = None,
         channel=None,
         preloaded_sounds: dict[str, object] | None = None,
         voice_multiplier: float = DEALER_VOICE_MULTIPLIER,
+        debug: bool | None = None,
     ) -> None:
         self.audio = audio_manager
         self.voice_multiplier = voice_multiplier
+        self.debug_enabled = DEBUG_DEALER_VOICE if debug is None else debug
+        self.line_names = line_names or PRERECORDED_LINES
         self.voice_directory = voice_directory or (
             Path(__file__).resolve().parents[1]
             / "static"
@@ -93,7 +97,7 @@ class DealerVoiceManager:
             self._preload_prerecorded_lines()
 
     def _debug(self, message: str) -> None:
-        if DEBUG_DEALER_VOICE:
+        if self.debug_enabled:
             print(f"[DEALER VOICE] {message}")
 
     def _find_line_path(self, name: str) -> Path | None:
@@ -101,7 +105,7 @@ class DealerVoiceManager:
         return matches[0] if matches else None
 
     def _preload_prerecorded_lines(self) -> None:
-        for name in PRERECORDED_LINES:
+        for name in self.line_names:
             path = self._find_line_path(name)
             if path is None:
                 self._debug(f"missing prerecorded line: {name}")
@@ -110,7 +114,7 @@ class DealerVoiceManager:
                 self.sounds[name] = pygame.mixer.Sound(str(path))
             except (pygame.error, OSError) as error:
                 self._debug(f"could not load {path.name}: {error}")
-        self._debug(f"preloaded {len(self.sounds)} / {len(PRERECORDED_LINES)} local lines")
+        self._debug(f"preloaded {len(self.sounds)} / {len(self.line_names)} local lines")
 
     def is_dealer_speaking(self) -> bool:
         return bool(self.channel and self.channel.get_busy())

@@ -42,6 +42,11 @@ class PokerScenarioGenerator:
             self.range_model,
             branch_simulations=min(1_500, equity_simulations),
             seed=seed,
+            # Sensitivity analysis is useful at production-quality sampling,
+            # but is unnecessary overhead for the low-simulation test/audit
+            # configurations. The primary EV evaluation still runs in all
+            # configurations.
+            sensitivity=equity_simulations >= 1_000,
         )
 
     def generate_round(self, round_index: int, hero_stack: int) -> PreparedPokerRound:

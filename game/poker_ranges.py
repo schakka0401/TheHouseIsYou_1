@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+import math
 import random
 
 from game.poker_hand_evaluator import evaluate_holdem
@@ -27,10 +28,7 @@ POSITION_LOOSENESS = {
     "BB": 0.02,
 }
 
-CALLING_RANGE_STRENGTH_SLOPE = 0.50
-PRESSURE_SELECTION_SLOPE = 0.30
-RANGE_STRENGTH_FOLD_ADJUSTMENT = 0.40
-NEUTRAL_RANGE_STRENGTH = 0.45
+CONTINUE_LOGIT_SLOPE = 10.0
 
 
 @dataclass(frozen=True)
@@ -196,15 +194,15 @@ class PokerRangeModel:
         self,
         scenario: PokerScenario,
         opponent: OpponentState,
-        hero_cost: int,
-        base_fold_probability: float,
+        raise_to: int,
+        behavior_bias: float = 0.0,
     ) -> ConditionalCallingRange:
         """Condition an opponent's existing range on continuing versus this size.
 
-        The supplied base fold probability retains the transparent profile,
-        street, prior-action, and pressure assumptions from the EV model. Combo
-        strength then redistributes those folds: stronger combinations continue
-        more often, and larger pressure makes the continuing range more selective.
+        Every prior combo receives its own continuation probability.  The main
+        inputs are that combo's made-hand/draw strength and its price; profile,
+        prior action, street, and stack commitment shift the threshold.  A
+        positive behavior bias represents a somewhat wider/more willing caller.
         """
         prior = self.weighted_combos(scenario, opponent)
         strengths = tuple(range_continue_strength(combo, scenario.board) for combo, _weight in prior)
@@ -212,12 +210,14 @@ class PokerRangeModel:
         prior_mean = sum(
             strength * weight for strength, (_combo, weight) in zip(strengths, prior)
         ) / total_prior_weight
+        hero_cost = max(0, raise_to - scenario.hero_contribution)
+        call_cost = min(max(0, raise_to - opponent.contribution), opponent.stack)
+        pot_after_call = scenario.pot + hero_cost + call_cost
+        pot_odds = call_cost / max(1, pot_after_call)
         pressure = hero_cost / max(1, scenario.pot)
-        strength_slope = CALLING_RANGE_STRENGTH_SLOPE + PRESSURE_SELECTION_SLOPE * min(2.0, pressure)
-        # A value-heavy prior range should not retain the same average fold rate
-        # as an air-heavy checked range merely because both share a profile.
-        range_adjusted_fold = base_fold_probability - RANGE_STRENGTH_FOLD_ADJUSTMENT * (
-            prior_mean - NEUTRAL_RANGE_STRENGTH
+        stack_fraction = call_cost / max(1, opponent.stack)
+        threshold = _continue_threshold(
+            scenario, opponent, pot_odds, pressure, stack_fraction
         )
 
         calling: list[tuple[tuple[Card, Card], float]] = []
@@ -225,11 +225,17 @@ class PokerRangeModel:
         calling_strength_weight = 0.0
         total_call_weight = 0.0
         for (combo, prior_weight), strength in zip(prior, strengths):
-            combo_fold = max(
-                0.01,
-                min(0.99, range_adjusted_fold + strength_slope * (prior_mean - strength)),
+            continue_probability = _logistic(
+                CONTINUE_LOGIT_SLOPE * (strength - threshold) + behavior_bias
             )
-            call_weight = prior_weight * (1.0 - combo_fold)
+            # Preserve small profile-dependent tails without allowing any hand
+            # to become an automatic call or fold.
+            tail = 0.025 if opponent.profile in {"LOOSE", "AGGRESSIVE"} else 0.012
+            floor = max(0.001, tail / (1.0 + 1.5 * pressure))
+            ceiling = 0.992 if opponent.profile != "TIGHT" else 0.982
+            continue_probability = max(floor, min(ceiling, continue_probability))
+            combo_fold = 1.0 - continue_probability
+            call_weight = prior_weight * continue_probability
             expected_fold_weight += prior_weight * combo_fold
             if call_weight > 0.000001:
                 calling.append((combo, call_weight))
@@ -243,6 +249,41 @@ class PokerRangeModel:
             prior_mean_strength=prior_mean,
             calling_mean_strength=calling_strength_weight / total_call_weight,
         )
+
+
+def _continue_threshold(
+    scenario: PokerScenario,
+    opponent: OpponentState,
+    pot_odds: float,
+    pressure: float,
+    stack_fraction: float,
+) -> float:
+    """Required 0-1 range strength for a neutral 50% continuation chance."""
+    if scenario.street == "preflop":
+        threshold = 0.55 + 0.45 * pot_odds + 0.08 * stack_fraction
+    else:
+        threshold = 0.30 + 0.55 * pot_odds + 0.10 * stack_fraction
+    threshold += 0.055 * math.log1p(min(8.0, pressure))
+    threshold += {"TIGHT": 0.045, "BALANCED": 0.0, "LOOSE": -0.050, "AGGRESSIVE": -0.035}[opponent.profile]
+    status = opponent.status.upper()
+    if "RAISED" in status:
+        threshold -= 0.085
+    elif "BET" in status:
+        threshold -= 0.065
+    elif "CALLED" in status:
+        threshold -= 0.040
+    elif "CHECKED" in status or status == "WAITING":
+        threshold += 0.025
+    if scenario.street == "river":
+        threshold += 0.025
+    return max(0.12, min(0.94, threshold))
+
+
+def _logistic(value: float) -> float:
+    if value >= 0:
+        return 1.0 / (1.0 + math.exp(-value))
+    exp_value = math.exp(value)
+    return exp_value / (1.0 + exp_value)
 
 
 def starting_hand_strength(combo: tuple[Card, Card]) -> float:
@@ -280,7 +321,7 @@ def range_continue_strength(combo: tuple[Card, Card], board: tuple[Card, ...]) -
     score = evaluate_holdem(combo, board)
     category_base = {
         0: 0.14,
-        1: 0.43,
+        1: 0.38,
         2: 0.62,
         3: 0.70,
         4: 0.78,
@@ -290,9 +331,21 @@ def range_continue_strength(combo: tuple[Card, Card], board: tuple[Card, ...]) -
         8: 1.00,
     }[score[0]]
     kicker_component = min(0.08, sum(score[1:]) / 500.0)
+    if score[0] == 1:
+        pair_rank = score[1]
+        board_values = sorted({RANK_VALUE[rank] for rank, _suit in board}, reverse=True)
+        board_overcards = sum(value > pair_rank for value in board_values)
+        if pair_rank not in board_values:  # pocket overpair or underpair
+            pair_adjustment = 0.13 if pair_rank > max(board_values) else -0.01 * board_overcards
+        else:
+            pair_adjustment = max(-0.025, 0.10 - 0.045 * board_overcards)
+        kicker_component += pair_adjustment
     category = postflop_category(combo, board)
-    draw_bonus = 0.12 if category == "strong_draw" else 0.06 if category == "weak_draw" else 0.0
-    return min(1.0, category_base + kicker_component + draw_bonus)
+    if category == "strong_draw":
+        return max(0.54, min(0.68, category_base + kicker_component + 0.34))
+    if category == "weak_draw":
+        return max(0.39, min(0.55, category_base + kicker_component + 0.22))
+    return min(1.0, category_base + kicker_component)
 
 
 def _draws(cards: tuple[Card, ...]) -> tuple[bool, bool]:
