@@ -23,18 +23,19 @@ BANKROLL_HORIZON = 100
 ACTION_PRESS_MS = 110
 DEBUG_RESULTS_LAYOUT = False
 
-CONFIDENCE_TRACK = pygame.Rect(55, 535, 330, 14)
-CONFIDENCE_CONFIRM = pygame.Rect(410, 515, 180, 54)
-WAGER_FIELD = pygame.Rect(650, 558, 170, 42)
-WAGER_CONFIRM = pygame.Rect(845, 552, 195, 48)
+CONFIDENCE_TRACK = pygame.Rect(840, 130, 330, 14)
+CONFIDENCE_CONFIRM = pygame.Rect(910, 205, 180, 54)
+WAGER_FIELD = pygame.Rect(800, 500, 170, 42)
+WAGER_CONFIRM = pygame.Rect(1000, 500, 195, 48)
 HIT_BUTTON = pygame.Rect(400, 610, 220, 55)
 STAND_BUTTON = pygame.Rect(660, 610, 220, 55)
 
+#For the chip tray
 CHIP_VALUES = (1, 5, 10, 25, 50, 100)
 CHIP_COLORS = ("white", "red", "blue", "green", "black", "purple")
 CHIP_SOURCE_SIZE = (54, 54)
 CHIP_DISPLAY_SIZE = (36, 36)
-CHIP_TRAY_ORIGIN = (650, 480)
+CHIP_TRAY_ORIGIN = (920, 380)
 CHIP_TRAY_STEP = (46, 38)
 
 DEALER_COMMENTS = (
@@ -585,13 +586,14 @@ class BlackjackGame:
 
     def _draw_hands(self) -> None:
         assert self.scenario is not None
-        self._draw_card(self.scenario.dealer_upcard, (520, 65))
-        self._draw_card(None, (640, 65), hidden=True)
+        self._draw_card(self.scenario.dealer_upcard, (225, 200))
+        self._draw_card(None, (345, 200), hidden=True)
         spacing = 120 if len(self.player_hand) <= 5 else 105
         total_width = 105 + spacing * (len(self.player_hand) - 1)
         player_x = max(35, (self.screen.get_width() - total_width) // 2)
+        # Displays the player's cards
         for index, card in enumerate(self.player_hand):
-            self._draw_card(card, (player_x + index * spacing, 280))
+            self._draw_card(card, (player_x + index * spacing - 300, 440))
 
     def _draw_small_button(self, rect: pygame.Rect, label: str, confirmed: bool, enabled: bool = True) -> None:
         fill = "#386641" if confirmed else "#5f421f" if enabled else "#383838"
@@ -621,7 +623,7 @@ class BlackjackGame:
         self.screen.blit(text, text.get_rect(center=draw_rect.center))
 
     def _draw_controls(self) -> None:
-        self._text("CONFIDENCE: Better decision, not chance to win", (55, 490), 22, "#d8d0b8")
+        self._text("CONFIDENCE: Better decision, not chance to win", (820, 100), 22, "#d8d0b8")
         pygame.draw.rect(self.screen, "#3b2418", CONFIDENCE_TRACK, border_radius=7)
         pygame.draw.rect(self.screen, "#b88732", CONFIDENCE_TRACK, width=2, border_radius=7)
         if self.confidence_level is not None:
@@ -630,11 +632,11 @@ class BlackjackGame:
             confidence_text = f"{self.confidence_level}/10  {confidence_probability(self.confidence_level):.0%}"
         else:
             confidence_text = "Choose 1-10"
-        self._text(confidence_text, (150, 558), 22, "#f1d277")
+        self._text(confidence_text, (960, 160), 22, "#f1d277")
         self._draw_small_button(CONFIDENCE_CONFIRM, "CONFIRM", self.confidence_confirmed, self.confidence_level is not None)
 
-        self._text(f"WAGER (1-{self.player_state.chips})", (650, 438), 22, "#d8d0b8")
-        self._text("CLICK CHIPS TO BUILD YOUR WAGER", (650, 462), 16, "#b9ad8f")
+        self._text(f"WAGER (1-{self.player_state.chips})", (920, 335), 22, "#d8d0b8")
+        self._text("CLICK CHIPS TO BUILD YOUR WAGER", (870, 357), 16, "#b9ad8f")
         self._draw_wager_chips()
         field_color = "#f1d277" if self.wager_focused else "#b88732"
         pygame.draw.rect(self.screen, "#24170f", WAGER_FIELD, border_radius=8)
@@ -698,8 +700,8 @@ class BlackjackGame:
         self._text(f"Shared bankroll: {self.player_state.chips} chips", (35, 80))
         self._draw_hands()
         player_total, _ = hand_value(self.player_hand)
-        self._text(f"DEALER SHOWS: {self.scenario.dealer_upcard[0]}", (50, 235), 29)
-        self._text(f"YOUR HAND: {player_total}", (50, 455), 29)
+        self._text(f"DEALER SHOWS: {self.scenario.dealer_upcard[0]}", (50, 150), 29)
+        self._text(f"YOUR HAND: {player_total}", (50, 390), 29)
 
         if self.phase in {"decision", "resolving"}:
             self._draw_controls()

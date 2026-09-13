@@ -33,6 +33,8 @@ BARTENDER_IMAGE = ASSETS / "bartender.png"
 STOOL_IMAGE = ASSETS / "stool.png"
 BEER_IMAGE = ASSETS / "beer.png"
 CUP_IMAGE = ASSETS / "cup.png"
+POKER_TABLE_IMAGE = ASSETS / "poker_table_clean.png"
+BLACKJACK_TABLE_IMAGE = ASSETS / "blackjack_table_clean.png"
 CHARACTER_SHEET = ASSETS / "2D Top Down Pixel Art Characters" / "000.png"
 CASINO_TILESET = CASINO_DIRECTORY / "2D_TopDown_Tileset_Casino_1024x512.png"
 SLOT_MACHINE_SHEET = CASINO_DIRECTORY / "Animated Sprite Sheets" / "SlotMachinesAnimationSheet_0.png"
@@ -130,15 +132,15 @@ TABLE_INTERACTION_DISTANCE = 190
 SLOT_MACHINE_INTERACTION_DISTANCE = 120
 BEVERAGE_POSITIONS = ((600, 245), (640, 245), (680, 245))
 STOOL_POSITIONS = (
-    (200, 520),
-    (320, 560),
-    (440, 520),
+    (145, 550),
+    (300, 590),
+    (455, 550),
     (560, 345),
     (640, 365),
     (720, 345),
-    (860, 575),
+    (860, 555),
     (980, 575),
-    (1100, 575),
+    (1100, 555),
 )
 
 
@@ -200,6 +202,16 @@ def load_stool() -> pygame.Surface:
     cropped = image.subsurface((400, 420, 450, 650)).copy()
     cropped.set_colorkey((0, 0, 0))
     return pygame.transform.scale(cropped, STOOL_DISPLAY_SIZE)
+
+
+def load_poker_table() -> pygame.Surface:
+    image = pygame.image.load(POKER_TABLE_IMAGE).convert_alpha()
+    return pygame.transform.scale(image, (390, 230))
+
+
+def load_blackjack_table() -> pygame.Surface:
+    image = pygame.image.load(BLACKJACK_TABLE_IMAGE).convert_alpha()
+    return pygame.transform.scale(image, (390, 225))
 
 
 def load_beer() -> pygame.Surface:
@@ -292,14 +304,12 @@ def load_casino_scenes() -> tuple[
     """Load the room, tables, bartender, and drinks from the casino tileset."""
     tileset = pygame.image.load(CASINO_TILESET).convert_alpha()
     room = make_casino_room(tileset, 0)
-    poker_table = tileset.subsurface((912, 368, 112, 55))
     center_table = tileset.subsurface((512, 88, 112, 60))
-    blackjack_table = tileset.subsurface((912, 197, 112, 55))
     drink = tileset.subsurface((650, 410, 10, 25))
     tables = [
-        pygame.transform.scale(poker_table, (350, 190)),
+        load_poker_table(),
         pygame.transform.scale(center_table, (400, 215)),
-        pygame.transform.scale(blackjack_table, (390, 176)),
+        load_blackjack_table(),
     ]
     return (
         room,
@@ -333,6 +343,16 @@ def draw_room(
     slot_machine = slot_machine_frames[slot_machine_frame]
     for center in SLOT_MACHINE_CENTERS:
         screen.blit(slot_machine, slot_machine.get_rect(center=center))
+    nearby_tables = [
+        (player.distance_to(CARD_TABLE_CENTER), tables[0], CARD_TABLE_CENTER, "play poker"),
+        (player.distance_to(BLACKJACK_TABLE_CENTER), tables[2], BLACKJACK_TABLE_CENTER, "play blackjack"),
+    ]
+    nearby_tables = [item for item in nearby_tables if item[0] < TABLE_INTERACTION_DISTANCE]
+    for _, table, center, _ in nearby_tables:
+        glow = pygame.Surface(WINDOW_SIZE, pygame.SRCALPHA)
+        glow_rect = table.get_rect(center=center).inflate(18, 18)
+        pygame.draw.ellipse(glow, (246, 211, 74, 130), glow_rect, width=8)
+        screen.blit(glow, (0, 0))
     screen.blit(tables[0], tables[0].get_rect(center=CARD_TABLE_CENTER))
     screen.blit(bartender, bartender.get_rect(midbottom=(CENTER_TABLE_CENTER.x, CENTER_TABLE_CENTER.y - 15)))
     screen.blit(tables[1], tables[1].get_rect(center=CENTER_TABLE_CENTER))
@@ -342,29 +362,11 @@ def draw_room(
     screen.blit(tables[2], tables[2].get_rect(center=BLACKJACK_TABLE_CENTER))
     for position in STOOL_POSITIONS:
         screen.blit(stool, stool.get_rect(center=position))
-
-    screen.blit(font.render("THE HOUSE IS YOU  —  CASINO FLOOR", True, "#ffffff"), (40, 30))
     screen.blit(image, image.get_rect(center=player))
-
-    interactions = [
-        (player.distance_to(CARD_TABLE_CENTER), CARD_TABLE_CENTER, TABLE_INTERACTION_DISTANCE, "play poker"),
-        (player.distance_to(BLACKJACK_TABLE_CENTER), BLACKJACK_TABLE_CENTER, TABLE_INTERACTION_DISTANCE, "play blackjack"),
-        *(
-            (player.distance_to(center), center, SLOT_MACHINE_INTERACTION_DISTANCE, "use the slot machine")
-            for center in SLOT_MACHINE_CENTERS
-        ),
-    ]
-    available_interactions = [item for item in interactions if item[0] < item[2]]
-    if available_interactions:
-        _, _, _, action = min(
-            available_interactions,
-            key=lambda item: item[0],
-        )
+    if nearby_tables:
+        _, _, _, action = min(nearby_tables, key=lambda item: item[0])
         prompt = font.render(f"Press E to {action}", True, "#ffffff")
         screen.blit(prompt, prompt.get_rect(center=(WINDOW_SIZE[0] // 2, WINDOW_SIZE[1] // 2)))
-    else:
-        hint = font.render("WASD: move     E: use the nearby game", True, "#ffffff")
-        screen.blit(hint, (40, 650))
 
 
 def draw_card_game(
@@ -627,6 +629,8 @@ def main() -> None:
         elif mode == "blackjack" and blackjack_game is not None:
             blackjack_game.update()
             blackjack_game.draw()
+        elif mode == "poker" and poker_game is not None:
+            poker_game.draw()
         else:
             # The room remains visible beneath the pause panel, but no gameplay
             # input, interaction, animation, or footsteps run while paused.
