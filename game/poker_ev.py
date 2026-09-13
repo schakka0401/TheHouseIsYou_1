@@ -21,8 +21,8 @@ from game.poker_ranges import PROFILE_CONFIG, PokerRangeModel
 RAISE_EV_TOLERANCE = 0.03
 NEAR_EQUAL_EV_TOLERANCE = 0.02
 AGGRESSIVE_BRANCH_SIMULATIONS = 1_500
-FOLD_PRESSURE_MAX_ADJUSTMENT = 0.24
-FOLD_PRESSURE_SCALE = 0.90
+SENSITIVITY_BRANCH_SIMULATIONS = 300
+SENSITIVITY_BEHAVIOR_BIASES = (-0.45, 0.45)
 
 REALIZATION_BY_STREET = {
     "preflop": 0.72,
@@ -46,11 +46,13 @@ class PokerEVModel:
         range_model: PokerRangeModel | None = None,
         branch_simulations: int = AGGRESSIVE_BRANCH_SIMULATIONS,
         seed: int | None = None,
+        sensitivity: bool = True,
     ) -> None:
         if branch_simulations <= 0:
             raise ValueError("Aggressive branch simulations must be positive")
         self.range_model = range_model or PokerRangeModel()
         self.branch_simulations = branch_simulations
+        self.sensitivity = sensitivity
         self.conditional_equity = PokerEquityEstimator(
             self.range_model,
             simulations=branch_simulations,
@@ -99,6 +101,24 @@ class PokerEVModel:
         near_equivalent = tuple(
             option.key for option in options if self._near_equal(best, option, scenario.pot)
         )
+        sensitivity_best_keys = [best.key]
+        if self.sensitivity and any(option.action in {"bet", "raise"} for option in options):
+            sensitivity_simulations = min(SENSITIVITY_BRANCH_SIMULATIONS, self.branch_simulations)
+            for behavior_bias in SENSITIVITY_BEHAVIOR_BIASES:
+                varied = [
+                    self._aggressive_option(
+                        scenario,
+                        option.amount,
+                        option.action,
+                        behavior_bias=behavior_bias,
+                        simulations=sensitivity_simulations,
+                    )
+                    if option.action in {"bet", "raise"} and option.amount is not None
+                    else option
+                    for option in options
+                ]
+                sensitivity_best_keys.append(max(varied, key=lambda candidate: candidate.ev).key)
+        model_sensitive = len({self._decision_family(key) for key in sensitivity_best_keys}) > 1
         preferred_range = None
         if best.action in {"bet", "raise"}:
             size_tolerance = max(1.0, scenario.pot * RAISE_EV_TOLERANCE)
@@ -126,6 +146,8 @@ class PokerEVModel:
             decision_margin=margin,
             difficulty=difficulty,
             near_equivalent_keys=near_equivalent,
+            sensitivity_best_keys=tuple(sensitivity_best_keys),
+            model_sensitive=model_sensitive,
         )
 
     @staticmethod
@@ -144,8 +166,17 @@ class PokerEVModel:
         pot_after_call = scenario.pot + cost
         return equity.equity * pot_after_call * REALIZATION_BY_STREET[scenario.street] - cost
 
-    def _aggressive_option(self, scenario: PokerScenario, raise_to: int, action: str) -> ActionOption:
-        trace, standard_error = self._aggressive_trace(scenario, raise_to)
+    def _aggressive_option(
+        self,
+        scenario: PokerScenario,
+        raise_to: int,
+        action: str,
+        behavior_bias: float = 0.0,
+        simulations: int | None = None,
+    ) -> ActionOption:
+        trace, standard_error = self._aggressive_trace(
+            scenario, raise_to, behavior_bias, simulations
+        )
         return ActionOption(
             key=self._sized_key(action, raise_to, scenario),
             action=action,
@@ -159,17 +190,21 @@ class PokerEVModel:
         self,
         scenario: PokerScenario,
         raise_to: int,
+        behavior_bias: float = 0.0,
+        simulations: int | None = None,
     ) -> tuple[AggressiveActionTrace, float]:
+        simulations = simulations or self.branch_simulations
         hero_cost = max(0, raise_to - scenario.hero_contribution)
         opponents = scenario.active_opponents
         realization = REALIZATION_BY_STREET[scenario.street]
         conditional_ranges = []
         responses: list[OpponentResponse] = []
         for opponent in opponents:
-            base_fold = self.fold_probability(opponent, scenario, hero_cost)
             conditioned = self.range_model.conditional_calling_range(
-                scenario, opponent, hero_cost, base_fold
+                scenario, opponent, raise_to, behavior_bias
             )
+            call_cost = min(max(0, raise_to - opponent.contribution), opponent.stack)
+            pot_odds = call_cost / max(1, scenario.pot + hero_cost + call_cost)
             conditional_ranges.append(conditioned)
             responses.append(OpponentResponse(
                 position=opponent.position,
@@ -178,6 +213,8 @@ class PokerEVModel:
                 fold_probability=conditioned.fold_probability,
                 prior_mean_strength=conditioned.prior_mean_strength,
                 calling_mean_strength=conditioned.calling_mean_strength,
+                pot_odds=pot_odds,
+                call_cost=call_cost,
             ))
 
         branches: list[AggressiveBranch] = []
@@ -202,7 +239,7 @@ class PokerEVModel:
                     for index in continuing_indices
                 )
                 called = self.conditional_equity.estimate_weighted_ranges(
-                    scenario, weighted_ranges, self.branch_simulations
+                    scenario, weighted_ranges, simulations
                 )
                 caller_contributions = sum(
                     min(max(0, raise_to - opponents[index].contribution), opponents[index].stack)
@@ -211,9 +248,10 @@ class PokerEVModel:
                 final_pot = scenario.pot + hero_cost + caller_contributions
                 called_equity = called.equity
                 equity_standard_error = called.standard_error
-                branch_ev = called_equity * final_pot * realization - hero_cost
+                branch_realization = 1.0 if hero_cost >= scenario.hero_stack else realization
+                branch_ev = called_equity * final_pot * branch_realization - hero_cost
                 uncertainty_variance += (
-                    branch_probability * final_pot * realization * equity_standard_error
+                    branch_probability * final_pot * branch_realization * equity_standard_error
                 ) ** 2
             weighted_ev = branch_probability * branch_ev
             branches.append(AggressiveBranch(
@@ -231,37 +269,28 @@ class PokerEVModel:
             pot_before=scenario.pot,
             hero_cost=hero_cost,
             pressure=hero_cost / max(1, scenario.pot),
-            simulations_per_called_branch=self.branch_simulations,
+            simulations_per_called_branch=simulations,
             opponent_responses=tuple(responses),
             branches=tuple(branches),
         )
         return trace, math.sqrt(uncertainty_variance)
 
+    def fold_probability(self, opponent: OpponentState, scenario: PokerScenario, hero_cost: int) -> float:
+        """Range-composition fold rate retained as a public audit helper."""
+        raise_to = scenario.hero_contribution + hero_cost
+        return self.range_model.conditional_calling_range(
+            scenario, opponent, raise_to
+        ).fold_probability
+
     @staticmethod
-    def fold_probability(opponent: OpponentState, scenario: PokerScenario, hero_cost: int) -> float:
-        """Baseline fold rate before combo-strength conditioning."""
-        config = PROFILE_CONFIG[opponent.profile]
-        probability = config["fold_base"]
-        status = opponent.status.upper()
-        if "BET" in status or "RAISED" in status:
-            probability -= 0.13
-        elif "CALLED" in status:
-            probability -= 0.07
-        elif "CHECKED" in status or status == "WAITING":
-            probability += 0.06
-        if scenario.street == "river":
-            probability += 0.04
-        elif scenario.street == "preflop":
-            probability -= 0.03
-        pressure = hero_cost / max(1, scenario.pot)
-        # Saturation preserves profile/prior-action differences at extreme
-        # sizes instead of forcing every opponent to the same 90% fold cap.
-        probability += FOLD_PRESSURE_MAX_ADJUSTMENT * math.tanh(
-            (pressure - 0.50) / FOLD_PRESSURE_SCALE
-        )
-        if hero_cost >= opponent.stack:
-            probability += 0.06
-        return max(0.05, min(0.90, probability))
+    def _decision_family(key: str) -> str:
+        if key == "all_in":
+            return "all_in"
+        if key.startswith("raise_to_"):
+            return "raise"
+        if key.startswith("bet_to_"):
+            return "bet"
+        return key
 
     @staticmethod
     def _sized_key(action: str, amount: int, scenario: PokerScenario) -> str:

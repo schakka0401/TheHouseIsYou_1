@@ -175,7 +175,7 @@ class PokerFeedbackSemanticsTests(unittest.TestCase):
         self.assertFalse(record.exact_preferred)
         self.assertTrue(record.acceptable_action)
         self.assertTrue(record.action_correct)
-        self.assertEqual(record.decision_classification, "NEAR-EQUIVALENT")
+        self.assertEqual(record.decision_classification, "CLOSE / MODEL-SENSITIVE")
         self.assertAlmostEqual(record.ev_regret, 0.5)
 
     def test_clearly_suboptimal_remains_incorrect(self) -> None:
@@ -183,7 +183,7 @@ class PokerFeedbackSemanticsTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             record = tracker.lock_decision(prepared_fixture(), 1, "fold", None, 95)
         self.assertFalse(record.acceptable_action)
-        self.assertEqual(record.decision_classification, "CLEARLY SUBOPTIMAL")
+        self.assertEqual(record.decision_classification, "CLEAR MISTAKE")
 
     def test_action_family_and_sizing_quality_are_stored_separately(self) -> None:
         tracker = PokerSessionTracker()
@@ -192,7 +192,7 @@ class PokerFeedbackSemanticsTests(unittest.TestCase):
         self.assertTrue(record.action_family_preferred)
         self.assertFalse(record.sizing_acceptable)
         self.assertAlmostEqual(record.sizing_regret, 10.7)
-        self.assertEqual(record.decision_classification, "CLEARLY SUBOPTIMAL")
+        self.assertEqual(record.decision_classification, "CLEAR MISTAKE")
 
     def test_calibration_uses_reasonable_decisions_and_value_left_uses_raw_ev(self) -> None:
         tracker = PokerSessionTracker()
@@ -213,7 +213,7 @@ class PokerFeedbackSemanticsTests(unittest.TestCase):
     def test_player_facing_summary_does_not_use_internal_regret_term(self) -> None:
         source = inspect.getsource(PokerGame._draw_summary).lower()
         self.assertNotIn("ev regret", source)
-        self.assertIn("value left on the table", source)
+        self.assertNotIn("value left on the table", source)
 
 
 if __name__ == "__main__":

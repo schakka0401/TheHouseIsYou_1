@@ -25,7 +25,11 @@ class PokerSessionTracker:
         chosen_ev = option.ev
         best_ev = prepared.evaluation.best_ev
         exact_preferred = option.key == prepared.evaluation.best_key
-        acceptable_action = option.key in prepared.evaluation.near_equivalent_keys
+        sensitivity_winners = set(prepared.evaluation.sensitivity_best_keys)
+        acceptable_action = (
+            option.key in prepared.evaluation.near_equivalent_keys
+            or option.key in sensitivity_winners
+        )
         action_family_preferred = action == prepared.evaluation.best_action
         same_action = [candidate for candidate in prepared.evaluation.options if candidate.action == action]
         same_action_best = max(same_action, key=lambda candidate: candidate.ev)
@@ -37,12 +41,16 @@ class PokerSessionTracker:
             PokerEVModel._near_equal(same_action_best, option, prepared.scenario.pot)
             if action in {"bet", "raise"} and same_action else True
         )
-        if exact_preferred:
-            classification = "MODEL-PREFERRED"
+        competing_near_equal = any(
+            key != prepared.evaluation.best_key
+            for key in prepared.evaluation.near_equivalent_keys
+        )
+        if acceptable_action and (prepared.evaluation.model_sensitive or competing_near_equal):
+            classification = "CLOSE / MODEL-SENSITIVE"
         elif acceptable_action:
-            classification = "NEAR-EQUIVALENT"
+            classification = "REASONABLE"
         else:
-            classification = "CLEARLY SUBOPTIMAL"
+            classification = "CLEAR MISTAKE"
         final_action = PokerAction("YOU", action, option.amount or 0)
         record = PokerDecisionRecord(
             round_number=round_number,
@@ -75,8 +83,8 @@ class PokerSessionTracker:
         count = len(self.records)
         exact_preferred = sum(record.exact_preferred for record in self.records)
         reasonable = sum(record.acceptable_action for record in self.records)
-        close_decisions = sum(record.decision_classification == "NEAR-EQUIVALENT" for record in self.records)
-        clear_mistakes = sum(record.decision_classification == "CLEARLY SUBOPTIMAL" for record in self.records)
+        close_decisions = sum(record.decision_classification == "CLOSE / MODEL-SENSITIVE" for record in self.records)
+        clear_mistakes = sum(record.decision_classification == "CLEAR MISTAKE" for record in self.records)
         preferred_families = sum(record.action_family_preferred for record in self.records)
         accuracy = reasonable / count
         average_confidence = mean(record.confidence_probability for record in self.records)
@@ -135,7 +143,7 @@ class PokerSessionTracker:
 
         high_confidence_clear = [
             record for record in self.records
-            if record.confidence_percent >= 80 and record.decision_classification == "CLEARLY SUBOPTIMAL"
+            if record.confidence_percent >= 80 and record.decision_classification == "CLEAR MISTAKE"
         ]
         if len(high_confidence_clear) >= 2:
             confidence_insight = "Your confidence stayed high even when several decisions lost meaningful value."

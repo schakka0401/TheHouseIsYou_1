@@ -70,12 +70,21 @@ def load_ui_assets() -> tuple[pygame.Surface, pygame.Surface, pygame.Surface]:
 
 
 def load_bartender_dialogue_assets() -> tuple[pygame.Surface, pygame.Surface]:
-    background = pygame.image.load(BARTENDER_PORTRAIT_IMAGE).convert()
-    portrait = pygame.image.load(BARTENDER_BACKGROUND_IMAGE).convert()
-    return (
-        pygame.transform.smoothscale(background, WINDOW_SIZE),
-        pygame.transform.smoothscale(portrait, (390, 390)),
-    )
+    if BARTENDER_PORTRAIT_IMAGE.exists() and BARTENDER_BACKGROUND_IMAGE.exists():
+        background = pygame.image.load(BARTENDER_PORTRAIT_IMAGE).convert()
+        portrait = pygame.image.load(BARTENDER_BACKGROUND_IMAGE).convert()
+        return (
+            pygame.transform.smoothscale(background, WINDOW_SIZE),
+            pygame.transform.smoothscale(portrait, (390, 390)),
+        )
+
+    # Dialogue artwork is optional in this checkout. Keep the interaction
+    # available with a simple generated backdrop and the already-loaded bar
+    # character instead of failing during application startup.
+    background = pygame.Surface(WINDOW_SIZE)
+    background.fill("#17233b")
+    portrait = pygame.transform.smoothscale(load_bartender(), (390, 390))
+    return background, portrait
 
 
 def scaled_options_menu(image: pygame.Surface, screen_size: tuple[int, int]) -> pygame.Surface:
@@ -198,6 +207,15 @@ def load_slot_machine_animation() -> list[pygame.Surface]:
 
 
 def load_slot_player(image_path: Path) -> pygame.Surface:
+    # Some asset checkouts do not include the optional slot-player renders.
+    # Fall back to the already-required player sprites so the casino scene
+    # remains launchable while preserving the intended slot-machine layout.
+    if not image_path.exists():
+        fallback_name = "player_right1.png" if "right" in image_path.stem.lower() else "player_right0.png"
+        image_path = PLAYER_SPRITE_DIRECTORY / fallback_name
+        image = pygame.image.load(image_path).convert_alpha()
+        return pygame.transform.smoothscale(image, SLOT_PLAYER_DISPLAY_SIZE)
+
     image = pygame.image.load(image_path).convert()
     image.set_colorkey((0, 0, 0))
     cropped = image.subsurface(visible_asset_rect(image)).copy()
@@ -230,9 +248,17 @@ def load_stool() -> pygame.Surface:
 
 
 def load_dealer() -> pygame.Surface:
-    image = pygame.image.load(DEALER_IMAGE).convert()
-    image.set_colorkey((0, 0, 0))
-    cropped = image.subsurface((197, 191, 630, 1142)).copy()
+    if DEALER_IMAGE.exists():
+        image = pygame.image.load(DEALER_IMAGE).convert()
+        image.set_colorkey((0, 0, 0))
+        cropped = image.subsurface((197, 191, 630, 1142)).copy()
+    else:
+        # The world dealer render is optional; use a character-sheet cell so
+        # the casino remains launchable when that decorative asset is absent.
+        image = pygame.image.load(CHARACTER_SHEET).convert()
+        cell_width = image.get_width() // 4
+        cell_height = image.get_height() // 6
+        cropped = image.subsurface((cell_width, 0, cell_width, cell_height)).copy()
     cropped.set_colorkey((0, 0, 0))
     return pygame.transform.scale(cropped, DEALER_DISPLAY_SIZE)
 

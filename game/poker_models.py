@@ -109,6 +109,10 @@ class PokerScenario:
         return min(self.hero_stack + self.hero_contribution, deepest_relevant)
 
     @property
+    def spr(self) -> float:
+        return self.effective_stack / max(1, self.pot)
+
+    @property
     def legal_actions(self) -> tuple[str, ...]:
         if self.amount_to_call > 0:
             actions = ["fold"]
@@ -131,9 +135,15 @@ class PokerScenario:
             round(self.pot * 0.50),
             round(self.pot * 0.75),
             round(self.pot),
+            round(self.pot * 1.25),
+            round(self.pot * 1.50),
             maximum,
         )
         return _legal_unique_sizes(raw, self.minimum_raise_to, maximum)
+
+    @property
+    def player_candidate_bet_sizes(self) -> tuple[int, ...]:
+        return self._player_facing_sizes(self.candidate_bet_sizes)
 
     @property
     def candidate_raise_sizes(self) -> tuple[int, ...]:
@@ -151,6 +161,20 @@ class PokerScenario:
         if self.current_bet < maximum < self.minimum_raise_to:
             return (maximum,)
         return full_raises
+
+    @property
+    def player_candidate_raise_sizes(self) -> tuple[int, ...]:
+        return self._player_facing_sizes(self.candidate_raise_sizes)
+
+    def _player_facing_sizes(self, sizes: tuple[int, ...]) -> tuple[int, ...]:
+        """Hide only implausibly huge deep-stack shoves; backend EV keeps them."""
+        maximum = self.effective_stack
+        if maximum not in sizes:
+            return sizes
+        shove_cost = max(0, maximum - self.hero_contribution)
+        plausible = self.spr <= 2.0 or shove_cost <= 1.5 * max(1, self.pot)
+        filtered = sizes if plausible else tuple(amount for amount in sizes if amount != maximum)
+        return filtered or (maximum,)
 
     @property
     def key(self) -> tuple:
@@ -195,6 +219,8 @@ class OpponentResponse:
     fold_probability: float
     prior_mean_strength: float
     calling_mean_strength: float
+    pot_odds: float = 0.0
+    call_cost: int = 0
 
 
 @dataclass(frozen=True)
@@ -240,6 +266,8 @@ class PokerActionEvaluation:
     decision_margin: float
     difficulty: str
     near_equivalent_keys: tuple[str, ...] = ()
+    sensitivity_best_keys: tuple[str, ...] = ()
+    model_sensitive: bool = False
 
     @property
     def action_evs(self) -> dict[str, float]:
@@ -324,6 +352,8 @@ class PokerDecisionRecord:
             "decision_margin": self.evaluation.decision_margin,
             "difficulty": self.evaluation.difficulty,
             "near_equivalent_options": list(self.evaluation.near_equivalent_keys),
+            "sensitivity_best_options": list(self.evaluation.sensitivity_best_keys),
+            "model_sensitive": self.evaluation.model_sensitive,
         }
 
 

@@ -57,7 +57,9 @@ def audit_preferred_distribution(
     for index, scenario in enumerate(distribution_scenarios(count, seed)):
         ranges = PokerRangeModel()
         equity = PokerEquityEstimator(ranges, equity_simulations, seed + index).estimate(scenario)
-        evaluation = PokerEVModel(ranges, branch_simulations, seed + 10_000 + index).evaluate(
+        evaluation = PokerEVModel(
+            ranges, branch_simulations, seed + 10_000 + index, sensitivity=False
+        ).evaluate(
             scenario, equity
         )
         aggressive = evaluation.best_action in {"bet", "raise"}
@@ -565,9 +567,8 @@ def fold_probability_matrix() -> tuple[dict, ...]:
                 model = PokerEVModel(PokerRangeModel(), branch_simulations=20, seed=3)
                 probabilities = []
                 for label, cost in (("small", 25), ("medium", 50), ("large", 100), ("all_in", 300)):
-                    baseline = model.fold_probability(opponent, scenario, cost)
                     conditioned = model.range_model.conditional_calling_range(
-                        scenario, opponent, cost, baseline
+                        scenario, opponent, cost
                     )
                     probabilities.append((label, conditioned.fold_probability))
                 rows.append({

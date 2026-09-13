@@ -641,9 +641,9 @@ class PokerGame:
         if self.prepared is None:
             return ()
         if self.selected_action == "bet":
-            return self.prepared.scenario.candidate_bet_sizes
+            return self.prepared.scenario.player_candidate_bet_sizes
         if self.selected_action == "raise":
-            return self.prepared.scenario.candidate_raise_sizes
+            return self.prepared.scenario.player_candidate_raise_sizes
         return ()
 
     def _draw_selected_chips(self) -> None:
@@ -764,12 +764,6 @@ class PokerGame:
             cursor_y += gap_after
 
         add_block("THE HOUSE SAYS", title_font, heading_color, gap_after=section_gap)
-        add_block("DECISION SCORE", score_label_font, heading_color, gap_after=line_gap)
-        score = summary.get("decision_score")
-        if score is None:
-            score = round(float(summary.get("action_accuracy", 0.0)) * 100)
-        add_block(f"{int(score)} / 100", score_value_font, score_color, gap_after=block_gap)
-
         add_block("DECISION QUALITY", section_font, heading_color, gap_after=section_gap)
         reasonable = int(summary.get("reasonable_decision_count", summary.get("preferred_action_count", 0)))
         rounds = int(summary.get("rounds", POKER_ROUNDS))
@@ -796,7 +790,7 @@ class PokerGame:
 
         confidence_insight = summary.get("confidence_insight")
         if show_confidence and confidence_insight:
-            add_block("CONFIDENCE", section_font, heading_color, gap_after=section_gap)
+            add_block("CONFIDENCE CHECK", section_font, heading_color, gap_after=section_gap)
             add_block(confidence_insight, body_font, gap_after=block_gap, max_lines=3)
 
         add_block(
@@ -881,7 +875,7 @@ class PokerGame:
             self.screen.blit(surface, rect)
         self.rematch_button.draw(self.screen, pygame.time.get_ticks())
 
-        # Raw "value left on the table" and internal regret metrics stay in the console/debug report.
+        # Raw EV instrumentation stays in the console/debug report.
         if DEBUG_POKER_RESULTS_LAYOUT:
             pygame.draw.rect(self.screen, (0, 255, 0), self.results_paper_rect, 2)
             pygame.draw.rect(self.screen, (0, 180, 255), self.results_safe_rect, 2)

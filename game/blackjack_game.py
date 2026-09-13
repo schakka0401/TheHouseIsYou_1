@@ -840,12 +840,12 @@ class BlackjackGame:
         accuracy = profile.get("accuracy", 0.0)
         gap = profile.get("calibration_gap", 0.0)
         if abs(gap) < 0.05:
-            calibration_line = "Confidence was well calibrated"
+            calibration_line = "Your confidence matched your decisions."
         elif gap > 0:
-            calibration_line = f"Overconfident by {abs(gap) * 100:.0f} points"
+            calibration_line = "You were more certain than your decisions justified."
         else:
-            calibration_line = f"Underconfident by {abs(gap) * 100:.0f} points"
-        add_lines(["CONFIDENCE"], section_font, burgundy, small_gap)
+            calibration_line = "Your decisions were stronger than your confidence suggested."
+        add_lines(["CONFIDENCE CHECK"], section_font, burgundy, small_gap)
         add_lines(
             [f"{confidence:.0%} confidence vs {accuracy:.0%} accuracy", calibration_line],
             body_font,
@@ -857,14 +857,14 @@ class BlackjackGame:
         if compact:
             bankroll_lines = [
                 f"Actual: {profile.get('actual_bankroll', 0)} chips",
-                f"Expected, your choices: {profile.get('expected_player_bankroll', 0):.0f}",
-                f"Optimal HIT/STAND, same wagers: {profile.get('expected_optimal_bankroll', 0):.0f}",
+                f"Expected with your choices: {profile.get('expected_player_bankroll', 0):.0f}",
+                f"Better decisions, same bets: {profile.get('expected_optimal_bankroll', 0):.0f}",
             ]
         else:
             bankroll_lines = [
                 f"Actual result: {profile.get('actual_bankroll', 0)} chips",
-                f"Expected from your choices: {profile.get('expected_player_bankroll', 0):.0f} chips",
-                f"Expected with optimal HIT/STAND: {profile.get('expected_optimal_bankroll', 0):.0f} chips",
+                f"Expected with your choices: {profile.get('expected_player_bankroll', 0):.0f} chips",
+                f"Expected with better decisions, same bets: {profile.get('expected_optimal_bankroll', 0):.0f} chips",
             ]
         wrapped_bankroll: list[str] = []
         for line in bankroll_lines:
@@ -873,7 +873,7 @@ class BlackjackGame:
         if compact:
             cursor_y += max(0, section_gap - small_gap)
         else:
-            add_lines(["Expected values use the same wagers."], small_font, muted_brown, section_gap)
+            cursor_y += max(0, section_gap - small_gap)
 
         add_lines(["WHAT THE HOUSE NOTICED"], section_font, burgundy, small_gap)
         comment_width = round(safe_rect.width * 0.84)
@@ -885,18 +885,24 @@ class BlackjackGame:
         add_lines(comment_lines, small_font, dark_brown, section_gap)
 
         horizon = projection.get("horizon", BANKROLL_HORIZON)
-        add_lines([f"{horizon}-DECISION SIMULATION"], section_font, burgundy, small_gap)
-        add_lines(["Repeating your observed betting behavior"], small_font, muted_brown, small_gap)
+        add_lines(["LONG-TERM RISK"], section_font, burgundy, small_gap)
+        add_lines([f"Chance of going broke within {horizon} decisions"], small_font, muted_brown, small_gap)
         risk_cap = projection.get("risk_cap", 0.10)
         simulation_lines = [
-            f"Your play: {player_projection.get('bankruptcy_probability', 0):.0%} bankruptcy",
-            f"Optimal / same bets: {optimal_projection.get('bankruptcy_probability', 0):.0%} bankruptcy",
-            f"Optimal / {risk_cap:.0%} risk cap: {capped_projection.get('bankruptcy_probability', 0):.0%} bankruptcy",
+            f"Your play: {player_projection.get('bankruptcy_probability', 0):.0%}",
+            f"Better decisions, same bets: {optimal_projection.get('bankruptcy_probability', 0):.0%}",
+            f"Better decisions, safer bets: {capped_projection.get('bankruptcy_probability', 0):.0%}",
         ]
         wrapped_simulation: list[str] = []
         for line in simulation_lines:
             wrapped_simulation.extend(self._wrap_result_text(line, body_font, safe_rect.width))
         add_lines(wrapped_simulation, body_font, dark_brown, section_gap)
+        add_lines(
+            [f"Safer bets = no more than {risk_cap:.0%} of bankroll"],
+            small_font,
+            muted_brown,
+            section_gap,
+        )
 
         button_width = round(safe_rect.width * 0.74)
         button_height = max(32, round(ph * 0.052))
